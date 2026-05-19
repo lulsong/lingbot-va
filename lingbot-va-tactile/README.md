@@ -90,6 +90,103 @@ PYTHONPATH="$PWD:$PWD/lingbot-va-tactile" \
 torchrun --nproc_per_node=1 -m tactile_va.server_tactile --config-name robotwin_tactile
 ```
 
+### LoRA Fine-Tuning
+
+For a 48 GB single GPU, avoid `--trainable-scope all`. A practical setting is
+to fully train the new tactile/action modules while adding LoRA adapters to the
+frozen transformer backbone:
+
+```bash
+python -m torch.distributed.run --nproc_per_node=1 \
+  lingbot-va-tactile/tactile_va/train_tactile.py \
+  --config-name robotwin_tactile_train \
+  --model-path /data/lingbot-va-models/lingbot-va-base \
+  --dataset-path /data/data_realworld/lerobot_export_dataset/local/insert-peg-cylinder-realmachine \
+  --stats-json-path lingbot-va-tactile/tactile_stats.json \
+  --save-root /data/lingbot-va-models/lingbot-va-tactile-lora-ft \
+  --batch-size 1 \
+  --learning-rate 1e-5 \
+  --dataset-init-worker 1 \
+  --load-worker 0 \
+  --gradient-accumulation-steps 1 \
+  --train-frame-chunk-size 4 \
+  --gc-interval 1 \
+  --trainable-scope tactile_action \
+  --enable-lora \
+  --lora-rank 8 \
+  --lora-alpha 16 \
+  --lora-target attention \
+  --overwrite-checkpoint
+```
+
+Useful LoRA targets:
+
+- `attention`: safest memory setting; adapts self/cross attention.
+- `attention_ffn`: stronger adaptation; higher memory and trainable count.
+- `self_attention`, `cross_attention`, `ffn`: targeted ablations.
+- `all_block_linear`: broadest adapter coverage; use only if memory allows.
+
+Saved LoRA checkpoints are inference-compatible with the normal loader:
+
+```text
+checkpoint_latest/
+├── transformer/      # full transformer weights with LoRA merged in
+└── lora_adapter/     # adapter-only tensors and metadata for bookkeeping
+```
+
+Use `checkpoint_latest/transformer` or just `checkpoint_latest` in offline
+validation and server commands; no extra adapter loading flag is needed.
+
+### RealMan + Pika Deployment
+
+Start the tactile inference server first. Use the base model path for VAE,
+tokenizer, and text encoder, and point `--transformer-path` to the fine-tuned
+tactile checkpoint:
+
+```bash
+python -m torch.distributed.run --nproc_per_node=1 \
+  lingbot-va-tactile/tactile_va/server_tactile.py \
+  --config-name robotwin_tactile \
+  --model-path /data/lingbot-va-models/lingbot-va-base \
+  --transformer-path /data/lingbot-va-models/lingbot-va-tactile-ft/checkpoints/checkpoint_latest \
+  --stats-json-path lingbot-va-tactile/tactile_stats.json \
+  --port 29536
+```
+
+Then run the local hardware client:
+
+```bash
+python lingbot-va-tactile/deploy_realman_tactile.py \
+  --server-host 127.0.0.1 \
+  --server-port 29536 \
+  --prompt "insert the peg into the cylinder hole" \
+  --pika-project-root /home/tujian/Projects/pika_sdk/PIKA_RM65B_data_acquisition \
+  --front-camera-id 12 \
+  --side-camera-id -1 \
+  --realsense-serial 315122271124 \
+  --gripper-port /dev/ttyUSB82 \
+  --tactile-port 0 \
+  --tactile-splitted-file config_mapping_gripper.json \
+  --tactile-calibrate-file calibration_gripper.json \
+  --tactile-target-keys 0,1 \
+  --action-mode print \
+  --visualize
+```
+
+`--action-mode print` is the safe dry mode. The current tactile dataset trains
+an 8D end-effector target `[x, y, z, qx, qy, qz, qw, gripper]`; use
+`--action-mode ee_pose` only after confirming the RealMan Cartesian API method
+and orientation convention. Use `--action-mode joint` only for checkpoints
+trained with joint-space actions.
+
+The tactile runtime path mirrors
+`/home/tujian/Projects/pika_sdk/PIKA_RM65B_data_acquisition/main_teleop.py`:
+`TactileDataProvider` is started on `--tactile-port`, zero-calibrated after
+warmup, and every inference step reads `get_latest_data()[0]`. Keys `0,1` are
+stacked into the model tensor `[2, 32, 58]` in that order. Keep the gripper
+unloaded during zero calibration, or pass `--no-tactile-zero-calibration` if you
+already calibrated the sensor externally.
+
 ## PIKA Real-Machine Pipeline
 
 For `/data/Datasets/PIKA_real_original/insert_peg_cylinder_RealMachine`, the raw data is compatible with the converter in this folder:

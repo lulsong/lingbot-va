@@ -1,6 +1,7 @@
 import argparse
 import os
 import sys
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -8,7 +9,14 @@ import torch.nn.functional as F
 from einops import rearrange
 from tqdm import tqdm
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+SCRIPT_DIR = Path(__file__).resolve().parent
+SIDECAR_ROOT = SCRIPT_DIR.parent
+REPO_ROOT = SIDECAR_ROOT.parent
+WAN_VA_ROOT = REPO_ROOT / "wan_va"
+for path in (str(SCRIPT_DIR), str(WAN_VA_ROOT), str(REPO_ROOT), str(SIDECAR_ROOT)):
+    while path in sys.path:
+        sys.path.remove(path)
+sys.path[:0] = [str(WAN_VA_ROOT), str(REPO_ROOT), str(SIDECAR_ROOT)]
 
 from tactile_va.configs import TACTILE_CONFIGS
 from tactile_va.configs.stats import apply_stats_json
@@ -43,10 +51,14 @@ class TactileVA_Server(VA_Server):
         logger.info("Replacing base transformer with tactile transformer...")
         del self.transformer
         torch.cuda.empty_cache()
-        transformer_path = os.path.join(
-            job_config.wan22_pretrained_model_name_or_path,
-            "transformer",
-        )
+        transformer_path = getattr(job_config, "transformer_path", None)
+        if transformer_path is None:
+            transformer_path = os.path.join(
+                job_config.wan22_pretrained_model_name_or_path,
+                "transformer",
+            )
+        elif os.path.isdir(os.path.join(transformer_path, "transformer")):
+            transformer_path = os.path.join(transformer_path, "transformer")
         self.transformer = load_tactile_transformer(
             transformer_path,
             torch_dtype=self.dtype,
@@ -497,6 +509,13 @@ class TactileVA_Server(VA_Server):
 
 def run(args):
     config = apply_stats_json(TACTILE_CONFIGS[args.config_name])
+    if args.model_path is not None:
+        config.wan22_pretrained_model_name_or_path = args.model_path
+    if args.transformer_path is not None:
+        config.transformer_path = args.transformer_path
+    if args.stats_json_path is not None:
+        config.stats_json_path = args.stats_json_path
+        config = apply_stats_json(config)
     port = config.port if args.port is None else args.port
     if args.save_root is not None:
         config.save_root = args.save_root
@@ -519,6 +538,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config-name", type=str, default="robotwin_tactile")
     parser.add_argument("--port", type=int, default=None)
+    parser.add_argument("--model-path", type=str, default=None)
+    parser.add_argument("--transformer-path", type=str, default=None)
+    parser.add_argument("--stats-json-path", type=str, default=None)
     parser.add_argument("--save_root", type=str, default=None)
     args = parser.parse_args()
     run(args)
