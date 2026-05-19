@@ -10,6 +10,9 @@ robotwin_tactile_cfg = EasyDict(deepcopy(va_shared_cfg))
 robotwin_tactile_cfg.__name__ = "Config: VA PA-STE tactile"
 
 robotwin_tactile_cfg.wan22_pretrained_model_name_or_path = "/path/to/pretrained/model"
+robotwin_tactile_cfg.transformer_path = None
+robotwin_tactile_cfg.infer_mode = "server"
+robotwin_tactile_cfg.prompt = "insert the peg into the cylinder hole"
 
 robotwin_tactile_cfg.attn_window = 30
 robotwin_tactile_cfg.frame_chunk_size = 4
@@ -92,6 +95,11 @@ robotwin_tactile_train_cfg.enable_wandb = False
 robotwin_tactile_train_cfg.dataset_init_worker = 1
 robotwin_tactile_train_cfg.load_worker = 16
 robotwin_tactile_train_cfg.trainable_scope = "all"
+robotwin_tactile_train_cfg.enable_lora = False
+robotwin_tactile_train_cfg.lora_rank = 16
+robotwin_tactile_train_cfg.lora_alpha = 32.0
+robotwin_tactile_train_cfg.lora_dropout = 0.0
+robotwin_tactile_train_cfg.lora_target = "attention_ffn"
 robotwin_tactile_train_cfg.train_frame_chunk_size = 0
 robotwin_tactile_train_cfg.save_interval = 1000
 robotwin_tactile_train_cfg.overwrite_checkpoint = False

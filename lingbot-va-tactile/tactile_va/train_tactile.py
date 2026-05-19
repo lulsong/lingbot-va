@@ -31,6 +31,13 @@ from tactile_va.configs import TACTILE_CONFIGS
 from tactile_va.configs.stats import apply_stats_json
 from tactile_va.dataset import MultiTactileLatentLeRobotDataset
 from tactile_va.modules import load_tactile_transformer
+from tactile_va.modules.lora import (
+    LoRAConfig,
+    apply_lora,
+    lora_metadata,
+    lora_trainable_parameter_count,
+    merge_lora_model_state_dict,
+)
 from wan_va.distributed.fsdp import apply_ac, shard_model
 from wan_va.distributed.util import _configure_model, dist_max, dist_mean, init_distributed
 from wan_va.train import Trainer as BaseTrainer
@@ -116,6 +123,8 @@ class TactileTrainer(BaseTrainer):
     def __init__(self, config):
         self.step = 0
         self.config = config
+        self.lora_config = None
+        self.lora_module_names = []
         self.device = torch.device(f"cuda:{config.local_rank}")
         self.dtype = config.param_dtype
         self.patch_size = config.patch_size
@@ -168,6 +177,23 @@ class TactileTrainer(BaseTrainer):
             self.transformer,
             getattr(config, "trainable_scope", "all"),
         )
+        if getattr(config, "enable_lora", False):
+            self.lora_config = LoRAConfig(
+                rank=int(getattr(config, "lora_rank", 16)),
+                alpha=float(getattr(config, "lora_alpha", 32.0)),
+                dropout=float(getattr(config, "lora_dropout", 0.0)),
+                target=str(getattr(config, "lora_target", "attention_ffn")),
+            )
+            self.lora_module_names = apply_lora(self.transformer, self.lora_config)
+            logger.info(
+                "Enabled LoRA target=%s rank=%s alpha=%s dropout=%s modules=%s trainable_params=%.2fM",
+                self.lora_config.target,
+                self.lora_config.rank,
+                self.lora_config.alpha,
+                self.lora_config.dropout,
+                len(self.lora_module_names),
+                lora_trainable_parameter_count(self.transformer) / 1e6,
+            )
 
         logger.info("Setting up activation checkpointing ...")
         apply_ac(self.transformer)
@@ -453,6 +479,13 @@ class TactileTrainer(BaseTrainer):
                 self.transformer,
                 options=StateDictOptions(full_state_dict=True, cpu_offload=True),
             )
+            lora_adapter_state = {}
+            if getattr(self.config, "enable_lora", False):
+                state_dict, lora_adapter_state = merge_lora_model_state_dict(
+                    self.transformer,
+                    state_dict,
+                    self.lora_config,
+                )
             state_dict_bf16 = {k: v.to(torch.bfloat16) for k, v in state_dict.items()}
             if self.config.rank == 0:
                 if getattr(self.config, "overwrite_checkpoint", False):
@@ -462,6 +495,19 @@ class TactileTrainer(BaseTrainer):
                 transformer_dir = checkpoint_dir / "transformer"
                 transformer_dir.mkdir(parents=True, exist_ok=True)
                 save_file(state_dict_bf16, transformer_dir / "diffusion_pytorch_model.safetensors")
+                if lora_adapter_state:
+                    adapter_dir = checkpoint_dir / "lora_adapter"
+                    adapter_dir.mkdir(parents=True, exist_ok=True)
+                    adapter_state_bf16 = {
+                        k: v.to(torch.bfloat16) for k, v in lora_adapter_state.items()
+                    }
+                    save_file(adapter_state_bf16, adapter_dir / "adapter_model.safetensors")
+                    with open(adapter_dir / "adapter_config.json", "w") as f:
+                        json.dump(
+                            lora_metadata(self.lora_config, self.lora_module_names),
+                            f,
+                            indent=2,
+                        )
                 config_dict = dict(self.transformer.config)
                 config_dict.pop("_name_or_path", None)
                 with open(transformer_dir / "config.json", "w") as f:
@@ -470,6 +516,18 @@ class TactileTrainer(BaseTrainer):
                     "step": self.step,
                     "trainable_scope": getattr(self.config, "trainable_scope", "all"),
                     "source_model": getattr(self.config, "wan22_pretrained_model_name_or_path", None),
+                    "enable_lora": bool(getattr(self.config, "enable_lora", False)),
+                    "lora": (
+                        lora_metadata(self.lora_config, self.lora_module_names)
+                        if self.lora_config is not None
+                        else None
+                    ),
+                    "checkpoint_note": (
+                        "transformer/ contains LoRA-merged full weights; "
+                        "lora_adapter/ is saved for experiment bookkeeping."
+                        if getattr(self.config, "enable_lora", False)
+                        else "transformer/ contains full weights."
+                    ),
                 }
                 with open(checkpoint_dir / "training_state.json", "w") as f:
                     json.dump(metadata, f, indent=2)
@@ -579,6 +637,16 @@ def run(args):
         config.train_frame_chunk_size = 0
     if args.trainable_scope is not None:
         config.trainable_scope = args.trainable_scope
+    if args.enable_lora is not None:
+        config.enable_lora = args.enable_lora
+    if args.lora_rank is not None:
+        config.lora_rank = args.lora_rank
+    if args.lora_alpha is not None:
+        config.lora_alpha = args.lora_alpha
+    if args.lora_dropout is not None:
+        config.lora_dropout = args.lora_dropout
+    if args.lora_target is not None:
+        config.lora_target = args.lora_target
     if args.load_worker is not None:
         config.load_worker = args.load_worker
     if args.dataset_init_worker is not None:
@@ -629,6 +697,23 @@ def main():
             "tactile_video",
             "modality_heads",
             "backbone",
+        ],
+        default=None,
+    )
+    parser.add_argument("--enable-lora", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--lora-rank", type=int, default=None)
+    parser.add_argument("--lora-alpha", type=float, default=None)
+    parser.add_argument("--lora-dropout", type=float, default=None)
+    parser.add_argument(
+        "--lora-target",
+        type=str,
+        choices=[
+            "attention",
+            "self_attention",
+            "cross_attention",
+            "ffn",
+            "attention_ffn",
+            "all_block_linear",
         ],
         default=None,
     )
