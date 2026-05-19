@@ -191,13 +191,19 @@ def _combined_tactile_map(tactile):
     return tactile.mean(axis=0)
 
 
+def _select_tactile_frame_ids(time_steps, num_frames):
+    if num_frames <= 0 or num_frames >= time_steps:
+        return np.arange(time_steps, dtype=int)
+    return np.linspace(0, time_steps - 1, num_frames, dtype=int)
+
+
 def plot_tactile_heatmaps(pred, target, out_dir, num_frames):
     plt = _load_pyplot()
     pred_map = _combined_tactile_map(pred)
     target_map = _combined_tactile_map(target)
     error_map = np.abs(pred_map - target_map)
     time_steps = pred_map.shape[0]
-    frame_ids = np.linspace(0, time_steps - 1, min(num_frames, time_steps), dtype=int)
+    frame_ids = _select_tactile_frame_ids(time_steps, num_frames)
 
     vmin = min(float(pred_map.min()), float(target_map.min()))
     vmax = max(float(pred_map.max()), float(target_map.max()))
@@ -226,7 +232,7 @@ def plot_tactile_heatmaps(pred, target, out_dir, num_frames):
 def plot_tactile_channels(pred, target, out_dir, num_frames):
     plt = _load_pyplot()
     channels, time_steps, _, _ = pred.shape
-    frame_ids = np.linspace(0, time_steps - 1, min(num_frames, time_steps), dtype=int)
+    frame_ids = _select_tactile_frame_ids(time_steps, num_frames)
     for channel in range(channels):
         pred_ch = pred[channel]
         target_ch = target[channel]
@@ -319,7 +325,12 @@ def main():
     parser.add_argument("--output-dir", type=str, required=True)
     parser.add_argument("--sample-index", type=int, default=0)
     parser.add_argument("--max-files", type=int, default=20)
-    parser.add_argument("--num-tactile-frames", type=int, default=8)
+    parser.add_argument(
+        "--num-tactile-frames",
+        type=int,
+        default=8,
+        help="Number of tactile time steps to draw in heatmaps; <=0 draws all frames",
+    )
     parser.add_argument("--contact-threshold", type=float, default=0.05)
     parser.add_argument("--plot-channels", action="store_true")
     args = parser.parse_args()
