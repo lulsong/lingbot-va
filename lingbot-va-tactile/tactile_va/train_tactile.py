@@ -333,6 +333,7 @@ class TactileTrainer(BaseTrainer):
             action=False,
         ).to(self.device)[None].repeat(batch_size, 1, 1)
         out["tactile_mask"] = tactile_mask
+        out["clean_latents"] = tactile * tactile_mask.float()
         return out
 
     @torch.no_grad()
@@ -413,29 +414,80 @@ class TactileTrainer(BaseTrainer):
             ).reshape(input_dict["tactile_dict"]["timesteps"].shape),
             input_dict["tactile_dict"]["tactile_mask"],
         )
-        temporal_loss = self._temporal_tactile_loss(tactile_pred, tactile_targets)
-        contact_loss = self._contact_tactile_loss(tactile_pred, tactile_targets)
+        tactile_clean_pred, tactile_clean_target = self._reconstruct_clean_tactile(
+            tactile_pred,
+            input_dict["tactile_dict"],
+        )
+        tactile_mask = input_dict["tactile_dict"]["tactile_mask"]
+        temporal_loss = self._temporal_tactile_loss(
+            tactile_clean_pred,
+            tactile_clean_target,
+            tactile_mask,
+        )
+        contact_loss = self._contact_tactile_loss(
+            tactile_clean_pred,
+            tactile_clean_target,
+            tactile_mask,
+        )
         tactile_loss = tactile_loss * getattr(self.config, "tactile_loss_weight", 1.0)
         tactile_loss = tactile_loss + temporal_loss + contact_loss
         scale = self.gradient_accumulation_steps
         return latent_loss / scale, action_loss / scale, tactile_loss / scale
 
-    def _temporal_tactile_loss(self, pred, target):
+    def _reconstruct_clean_tactile(self, velocity_pred, tactile_dict):
+        """Recover predicted clean pressure maps from flow-matching velocity."""
+        timesteps = tactile_dict["timesteps"]
+        timestep_flat = timesteps.flatten()
+        scheduler_timesteps = self.train_scheduler_tactile.timesteps.to(timestep_flat.device)
+        timestep_ids = torch.argmin(
+            (scheduler_timesteps[:, None] - timestep_flat[None]).abs(),
+            dim=0,
+        )
+        sigmas = self.train_scheduler_tactile.sigmas.to(
+            device=velocity_pred.device,
+            dtype=torch.float32,
+        )[timestep_ids]
+        sigmas = sigmas.reshape(timesteps.shape).view(
+            timesteps.shape[0],
+            1,
+            timesteps.shape[1],
+            1,
+            1,
+        )
+        pred_clean = tactile_dict["noisy_latents"].float() - sigmas * velocity_pred.float()
+        target_clean = tactile_dict["clean_latents"].float().detach()
+        mask = tactile_dict["tactile_mask"].float()
+        return pred_clean * mask, target_clean * mask
+
+    def _temporal_tactile_loss(self, pred, target, mask=None):
         weight = getattr(self.config, "tactile_temporal_loss_weight", 0.0)
         if weight <= 0 or pred.shape[2] < 2:
             return pred.new_tensor(0.0)
         pred_dt = pred[:, :, 1:] - pred[:, :, :-1]
         target_dt = target[:, :, 1:] - target[:, :, :-1]
-        return F.l1_loss(pred_dt.float(), target_dt.float().detach()) * weight
+        loss = F.l1_loss(pred_dt.float(), target_dt.float().detach(), reduction="none")
+        if mask is None:
+            return loss.mean() * weight
+        temporal_mask = (mask[:, :, 1:] & mask[:, :, :-1]).float()
+        return (loss * temporal_mask).sum() / temporal_mask.sum().clamp_min(1.0) * weight
 
-    def _contact_tactile_loss(self, pred, target):
+    def _contact_tactile_loss(self, pred, target, mask=None):
         weight = getattr(self.config, "tactile_contact_loss_weight", 0.0)
         if weight <= 0:
             return pred.new_tensor(0.0)
         threshold = getattr(self.config, "tactile_contact_threshold", 0.05)
+        logit_scale = getattr(self.config, "tactile_contact_logit_scale", 4.0)
         target_contact = (target.float() > threshold).float()
-        pred_contact_logit = pred.float() * 4.0
-        return F.binary_cross_entropy_with_logits(pred_contact_logit, target_contact) * weight
+        pred_contact_logit = (pred.float() - threshold) * logit_scale
+        loss = F.binary_cross_entropy_with_logits(
+            pred_contact_logit,
+            target_contact,
+            reduction="none",
+        )
+        if mask is None:
+            return loss.mean() * weight
+        mask = mask.float()
+        return (loss * mask).sum() / mask.sum().clamp_min(1.0) * weight
 
     def _frame_loss(self, pred, target, frame_weight, mask=None):
         loss = F.mse_loss(pred.float(), target.float().detach(), reduction="none")

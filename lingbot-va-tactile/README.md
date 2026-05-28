@@ -257,3 +257,89 @@ This is not strict checkpoint-compatible with released LingBot-VA weights becaus
 - shape-mismatched weights are skipped.
 
 Fine-tuning on synchronized visual/action/tactile demonstrations is required.
+
+## Offline Validation
+
+`validate_tactile_offline.py` computes denoising metrics. Its saved
+predictions are one-step `x0` reconstructions, not generated future rollouts.
+For visually comparable diagnostic heatmaps, fix the tactile diffusion
+timestep so every plotted tactile frame has the same noise severity:
+
+```bash
+python lingbot-va-tactile/validate_tactile_offline.py \
+  --checkpoint-path /data/lingbot-va-models/lingbot-va-tactile-lora-ft/checkpoints/checkpoint_latest \
+  --model-path /data/lingbot-va-models/lingbot-va-base \
+  --dataset-path /data/data_realworld/lerobot_export_dataset/local/insert-peg-cylinder-realmachine \
+  --stats-json-path lingbot-va-tactile/tactile_stats.json \
+  --batch-size 1 \
+  --max-batches 20 \
+  --train-frame-chunk-size 4 \
+  --load-worker 0 \
+  --dataset-init-worker 1 \
+  --fixed-tactile-timestep 200 \
+  --prediction-output-dir /data/lingbot-va-models/lingbot-va-tactile-ft/offline_predictions_fixed_t200 \
+  --save-prediction-batches 5
+
+python lingbot-va-tactile/visualize_offline_predictions.py \
+  --input /data/lingbot-va-models/lingbot-va-tactile-ft/offline_predictions_fixed_t200 \
+  --output-dir /data/lingbot-va-models/lingbot-va-tactile-ft/offline_prediction_vis_fixed_t200 \
+  --max-files 5 \
+  --num-tactile-frames 0 \
+  --plot-channels
+```
+
+### Qualitative Multimodal Future Rollout
+
+Use `qualitative_tactile_rollout.py` for figures that show actual predicted
+future trajectories. It caches real visual/action/tactile context from a
+dataset segment and samples in deployment order: future video latents, future
+tactile maps, then future actions conditioned on the cached visual/tactile
+predictions. All modalities are compared against the held-out continuation:
+
+```bash
+python lingbot-va-tactile/qualitative_tactile_rollout.py \
+  --checkpoint-path /data/lingbot-va-models/lingbot-va-tactile-lora-ft/checkpoints/checkpoint_latest \
+  --model-path /data/lingbot-va-models/lingbot-va-base \
+  --dataset-path /data/data_realworld/lerobot_export_dataset/local/insert-peg-cylinder-realmachine \
+  --stats-json-path lingbot-va-tactile/tactile_stats.json \
+  --output-dir /data/lingbot-va-models/lingbot-va-tactile-lora-ft/future_tactile_figures \
+  --segment-index 0 \
+  --num-segments 5 \
+  --context-latent-frames 1 \
+  --future-latent-frames 4 \
+  --video-inference-steps 25 \
+  --tactile-inference-steps 50 \
+  --action-inference-steps 50 \
+  --num-plot-frames 8 \
+  --plot-channels \
+  --load-worker 0 \
+  --dataset-init-worker 1
+```
+
+With the default temporal configuration, `--future-latent-frames 4` generates
+`4 * tactile_per_frame = 64` future tactile maps. Each output segment directory
+contains `future_tactile_rollout.pt`, tactile heatmaps, raw-unit action
+trajectory curves/CSV, video-latent diagnostics, and multimodal JSON metrics.
+
+To decode the video latents into directly viewable RGB comparisons, enable the
+Wan VAE visualization path. Decoding defaults to CPU to avoid increasing GPU
+memory pressure during rollout:
+
+```bash
+python lingbot-va-tactile/qualitative_tactile_rollout.py \
+  --checkpoint-path /data/lingbot-va-models/lingbot-va-tactile-lora-ft/checkpoints/checkpoint_latest \
+  --model-path /data/lingbot-va-models/lingbot-va-base \
+  --dataset-path /data/data_realworld/lerobot_export_dataset/local/insert-peg-cylinder-realmachine \
+  --stats-json-path lingbot-va-tactile/tactile_stats.json \
+  --output-dir /data/lingbot-va-models/lingbot-va-tactile-lora-ft/multimodal_rollout_figures \
+  --context-latent-frames 1 \
+  --future-latent-frames 4 \
+  --video-inference-steps 25 \
+  --tactile-inference-steps 50 \
+  --action-inference-steps 50 \
+  --decode-video \
+  --video-decode-device cpu \
+  --save-video-mp4 \
+  --num-segments 5 \
+  --plot-channels
+```

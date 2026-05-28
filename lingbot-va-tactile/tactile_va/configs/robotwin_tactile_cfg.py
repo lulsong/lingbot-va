@@ -30,9 +30,9 @@ robotwin_tactile_cfg.obs_cam_keys = [
 
 robotwin_tactile_cfg.guidance_scale = 5
 robotwin_tactile_cfg.action_guidance_scale = 1
-robotwin_tactile_cfg.num_inference_steps = 5
+robotwin_tactile_cfg.num_inference_steps = 50
 robotwin_tactile_cfg.video_exec_step = -1
-robotwin_tactile_cfg.action_num_inference_steps = 10
+robotwin_tactile_cfg.action_num_inference_steps = 50
 robotwin_tactile_cfg.snr_shift = 5.0
 robotwin_tactile_cfg.action_snr_shift = 1.0
 
@@ -101,7 +101,7 @@ robotwin_tactile_train_cfg.lora_alpha = 32.0
 robotwin_tactile_train_cfg.lora_dropout = 0.0
 robotwin_tactile_train_cfg.lora_target = "attention_ffn"
 robotwin_tactile_train_cfg.train_frame_chunk_size = 0
-robotwin_tactile_train_cfg.save_interval = 1000
+robotwin_tactile_train_cfg.save_interval = 10
 robotwin_tactile_train_cfg.overwrite_checkpoint = False
 robotwin_tactile_train_cfg.gc_interval = 50
 robotwin_tactile_train_cfg.cfg_prob = 0.1
@@ -112,4 +112,4 @@ robotwin_tactile_train_cfg.weight_decay = 0.1
 robotwin_tactile_train_cfg.warmup_steps = 10
 robotwin_tactile_train_cfg.batch_size = 1
 robotwin_tactile_train_cfg.gradient_accumulation_steps = 1
-robotwin_tactile_train_cfg.num_steps = 50000
+robotwin_tactile_train_cfg.num_steps = 3000

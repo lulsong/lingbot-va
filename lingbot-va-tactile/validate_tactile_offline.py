@@ -82,11 +82,20 @@ def _move_batch_to_device(batch, device):
 
 
 class OfflineTactileValidator:
-    def __init__(self, config, checkpoint_path, device, dtype, attn_mode):
+    def __init__(
+        self,
+        config,
+        checkpoint_path,
+        device,
+        dtype,
+        attn_mode,
+        fixed_tactile_timestep=None,
+    ):
         self.config = config
         self.device = torch.device(device)
         self.dtype = dtype
         self.patch_size = config.patch_size
+        self.fixed_tactile_timestep = fixed_tactile_timestep
 
         transformer_path = _resolve_transformer_path(
             checkpoint_path=checkpoint_path,
@@ -151,12 +160,27 @@ class OfflineTactileValidator:
         return out
 
     @torch.no_grad()
-    def _add_noise(self, latent, train_scheduler, mask=None, action_mode=False, noisy_cond_prob=0.0):
+    def _add_noise(
+        self,
+        latent,
+        train_scheduler,
+        mask=None,
+        action_mode=False,
+        noisy_cond_prob=0.0,
+        fixed_timestep=None,
+    ):
         batch_size, _, frames, _, _ = latent.shape
-        timestep_ids = sample_timestep_id(
-            batch_size=frames,
-            num_train_timesteps=train_scheduler.num_train_timesteps,
-        )
+        if fixed_timestep is None:
+            timestep_ids = sample_timestep_id(
+                batch_size=frames,
+                num_train_timesteps=train_scheduler.num_train_timesteps,
+            )
+        else:
+            requested = torch.full((frames,), float(fixed_timestep))
+            timestep_ids = torch.argmin(
+                (train_scheduler.timesteps[:, None] - requested[None]).abs(),
+                dim=0,
+            )
         noise = torch.zeros_like(latent).normal_()
         timesteps = train_scheduler.timesteps[timestep_ids].to(device=self.device)
         noisy_latents = train_scheduler.add_noise(latent, noise, timesteps, t_dim=2)
@@ -207,12 +231,18 @@ class OfflineTactileValidator:
 
     @torch.no_grad()
     def _add_tactile_noise(self, tactile, tactile_mask):
+        fixed_timestep = self.fixed_tactile_timestep
         out = self._add_noise(
             latent=tactile,
             train_scheduler=self.train_scheduler_tactile,
             mask=tactile_mask,
             action_mode=True,
-            noisy_cond_prob=getattr(self.config, "tactile_noisy_cond_prob", 0.5),
+            noisy_cond_prob=(
+                0.0
+                if fixed_timestep is not None
+                else getattr(self.config, "tactile_noisy_cond_prob", 0.5)
+            ),
+            fixed_timestep=fixed_timestep,
         )
         batch_size = tactile.shape[0]
         token_grid = getattr(self.config, "tactile_token_grid", (4, 6))
@@ -226,6 +256,7 @@ class OfflineTactileValidator:
             action=False,
         ).to(self.device)[None].repeat(batch_size, 1, 1)
         out["tactile_mask"] = tactile_mask
+        out["clean_latents"] = tactile * tactile_mask.float()
         return out
 
     @torch.no_grad()
@@ -270,22 +301,49 @@ class OfflineTactileValidator:
         mask = mask.float().permute(0, 2, 3, 4, 1).flatten(0, 1).flatten(1)
         return (loss.sum(dim=1) / (mask.sum(dim=1) + 1e-6)).mean()
 
-    def _temporal_tactile_loss(self, pred, target):
+    def _temporal_tactile_loss(self, pred, target, mask=None):
         weight = getattr(self.config, "tactile_temporal_loss_weight", 0.0)
         if weight <= 0 or pred.shape[2] < 2:
             return pred.new_tensor(0.0)
         pred_dt = pred[:, :, 1:] - pred[:, :, :-1]
         target_dt = target[:, :, 1:] - target[:, :, :-1]
-        return F.l1_loss(pred_dt.float(), target_dt.float().detach()) * weight
+        loss = F.l1_loss(pred_dt.float(), target_dt.float().detach(), reduction="none")
+        if mask is None:
+            return loss.mean() * weight
+        temporal_mask = (mask[:, :, 1:] & mask[:, :, :-1]).float()
+        return (loss * temporal_mask).sum() / temporal_mask.sum().clamp_min(1.0) * weight
 
-    def _contact_tactile_loss(self, pred, target):
+    def _contact_tactile_loss(self, pred, target, mask=None):
         weight = getattr(self.config, "tactile_contact_loss_weight", 0.0)
         if weight <= 0:
             return pred.new_tensor(0.0)
         threshold = getattr(self.config, "tactile_contact_threshold", 0.05)
+        logit_scale = getattr(self.config, "tactile_contact_logit_scale", 4.0)
         target_contact = (target.float() > threshold).float()
-        pred_contact_logit = pred.float() * 4.0
-        return F.binary_cross_entropy_with_logits(pred_contact_logit, target_contact) * weight
+        pred_contact_logit = (pred.float() - threshold) * logit_scale
+        loss = F.binary_cross_entropy_with_logits(
+            pred_contact_logit,
+            target_contact,
+            reduction="none",
+        )
+        if mask is None:
+            return loss.mean() * weight
+        mask = mask.float()
+        return (loss * mask).sum() / mask.sum().clamp_min(1.0) * weight
+
+    def _reconstruct_clean_tactile(self, velocity_pred, tactile_dict):
+        tactile_sigma = self._sigmas_for_timesteps(
+            self.train_scheduler_tactile,
+            tactile_dict["timesteps"],
+            tactile_dict["noisy_latents"],
+        )
+        pred_clean = (
+            tactile_dict["noisy_latents"].float()
+            - tactile_sigma.float() * velocity_pred.float()
+        )
+        target_clean = tactile_dict["clean_latents"].float().detach()
+        tactile_mask = tactile_dict["tactile_mask"].float()
+        return pred_clean * tactile_mask, target_clean * tactile_mask
 
     def compute_loss(self, input_dict, pred):
         latent_pred, action_pred, tactile_pred = pred
@@ -330,8 +388,21 @@ class OfflineTactileValidator:
             tactile_weight,
             input_dict["tactile_dict"]["tactile_mask"],
         )
-        temporal_loss = self._temporal_tactile_loss(tactile_pred, tactile_targets)
-        contact_loss = self._contact_tactile_loss(tactile_pred, tactile_targets)
+        tactile_clean_pred, tactile_clean_target = self._reconstruct_clean_tactile(
+            tactile_pred,
+            input_dict["tactile_dict"],
+        )
+        tactile_mask = input_dict["tactile_dict"]["tactile_mask"]
+        temporal_loss = self._temporal_tactile_loss(
+            tactile_clean_pred,
+            tactile_clean_target,
+            tactile_mask,
+        )
+        contact_loss = self._contact_tactile_loss(
+            tactile_clean_pred,
+            tactile_clean_target,
+            tactile_mask,
+        )
         tactile_total_loss = (
             tactile_mse_loss * getattr(self.config, "tactile_loss_weight", 1.0)
             + temporal_loss
@@ -488,9 +559,12 @@ class OfflineTactileValidator:
         cpu_payload["meta"] = {
             "batch_idx": batch_idx,
             "used_action_channel_ids": list(self.config.used_action_channel_ids),
+            "fixed_tactile_timestep": self.fixed_tactile_timestep,
             "note": (
                 "video_pred_latent/action_pred/tactile_pred are one-step x0 estimates "
-                "from validation denoising, not full closed-loop rollout samples."
+                "from validation denoising, not full closed-loop rollout samples. "
+                "When fixed_tactile_timestep is set, tactile frames use one controlled "
+                "noise severity and tactile conditional corruption is disabled."
             ),
         }
         torch.save(cpu_payload, output_dir / f"prediction_batch_{batch_idx:06d}.pt")
@@ -517,6 +591,10 @@ def run(args):
         raise RuntimeError("CUDA is not available; pass --device cpu to run on CPU.")
     if args.save_prediction_batches > 0 and not args.prediction_output_dir:
         raise ValueError("--prediction-output-dir is required when --save-prediction-batches > 0")
+    if args.fixed_tactile_timestep is not None and not (
+        0 <= args.fixed_tactile_timestep <= 1000
+    ):
+        raise ValueError("--fixed-tactile-timestep must be between 0 and 1000.")
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -547,6 +625,7 @@ def run(args):
         device=args.device,
         dtype=dtype,
         attn_mode=args.attn_mode,
+        fixed_tactile_timestep=args.fixed_tactile_timestep,
     )
 
     logger.info("Loading tactile LeRobot validation dataset...")
@@ -614,6 +693,7 @@ def run(args):
     )
     metrics["train_frame_chunk_size"] = int(getattr(config, "train_frame_chunk_size", 0) or 0)
     metrics["attn_mode"] = args.attn_mode
+    metrics["fixed_tactile_timestep"] = args.fixed_tactile_timestep
 
     print(json.dumps(metrics, indent=2, sort_keys=True))
     if args.output_json:
@@ -646,6 +726,16 @@ def main():
     parser.add_argument("--dataset-init-worker", type=int, default=1)
     parser.add_argument("--gc-interval", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--fixed-tactile-timestep",
+        type=float,
+        default=None,
+        help=(
+            "Use one tactile diffusion timestep value in [0, 1000] for every "
+            "tactile frame. This produces controlled one-step denoising plots; "
+            "video/action timesteps remain randomly sampled."
+        ),
+    )
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--dtype", type=str, default="bf16", choices=["bf16", "fp16", "fp32"])
     parser.add_argument("--attn-mode", type=str, default="flex", choices=["flex", "torch"])
