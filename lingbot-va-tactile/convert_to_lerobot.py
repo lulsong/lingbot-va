@@ -67,6 +67,23 @@ DELTA_ACTION_COLUMNS = [
     "action_delta_qw",
 ]
 
+TARGET_JOINT_COLUMNS = [
+    "arm_target_j1",
+    "arm_target_j2",
+    "arm_target_j3",
+    "arm_target_j4",
+    "arm_target_j5",
+    "arm_target_j6",
+    "arm_target_j7",
+]
+
+ACTION_LAYOUT_EEF_GRIPPER = "eef_gripper"
+ACTION_LAYOUT_EEF_JOINT_GRIPPER = "eef_joint_gripper"
+ACTION_LAYOUT_CHOICES = {
+    ACTION_LAYOUT_EEF_GRIPPER,
+    ACTION_LAYOUT_EEF_JOINT_GRIPPER,
+}
+
 
 @dataclass
 class Args:
@@ -95,6 +112,8 @@ class Args:
     action_zero_pose_window: int = 5
     action_clamp_position_mps: float = 0.5
     action_clamp_rotation_rps: float = 1.0
+    action_layout: str = ACTION_LAYOUT_EEF_GRIPPER
+    joint_target_shift: int = 1
     dry_run: bool = False
 
 
@@ -327,6 +346,78 @@ def _extract_action_target(
     return target_position, target_quaternion, target_gripper, True
 
 
+def _validate_action_layout(action_layout: str) -> str:
+    if action_layout not in ACTION_LAYOUT_CHOICES:
+        raise ValueError(
+            f"Unsupported action_layout={action_layout!r}; "
+            f"choose from {sorted(ACTION_LAYOUT_CHOICES)}"
+        )
+    return action_layout
+
+
+def _action_names(action_layout: str) -> list[str]:
+    _validate_action_layout(action_layout)
+    eef_names = ["eef_x", "eef_y", "eef_z", "eef_qx", "eef_qy", "eef_qz", "eef_qw"]
+    if action_layout == ACTION_LAYOUT_EEF_GRIPPER:
+        return eef_names + ["gripper"]
+    joint_names = [f"joint_{idx}" for idx in range(1, 8)]
+    return eef_names + joint_names + ["gripper"]
+
+
+def _has_valid_columns(row: dict[str, str], columns: list[str]) -> bool:
+    return all(column in row and not _is_missing_value(row.get(column)) for column in columns)
+
+
+def _extract_joint_action(
+    row: dict[str, str],
+    csv_path: Path,
+    rows: list[dict[str, str]] | None = None,
+    frame_idx: int | None = None,
+    joint_target_shift: int = 1,
+) -> tuple[np.ndarray, str]:
+    if _has_valid_columns(row, TARGET_JOINT_COLUMNS):
+        return _float_row(row, TARGET_JOINT_COLUMNS, csv_path), "target_joint"
+
+    if rows is not None and frame_idx is not None and joint_target_shift > 0:
+        target_idx = min(len(rows) - 1, frame_idx + int(joint_target_shift))
+        if target_idx > frame_idx and _has_valid_columns(rows[target_idx], JOINT_COLUMNS):
+            return (
+                _float_row(rows[target_idx], JOINT_COLUMNS, csv_path),
+                f"future_observed_joint_t+{target_idx - frame_idx}",
+            )
+
+    return _float_row(row, JOINT_COLUMNS, csv_path), "current_observed_joint_fallback"
+
+
+def _build_action_vector(
+    action_layout: str,
+    clamped_position: np.ndarray,
+    clamped_quaternion: np.ndarray,
+    joint_action: np.ndarray,
+    target_gripper: float,
+) -> np.ndarray:
+    _validate_action_layout(action_layout)
+    eef_action = np.asarray(
+        [
+            float(clamped_position[0]),
+            float(clamped_position[1]),
+            float(clamped_position[2]),
+            float(clamped_quaternion[0]),
+            float(clamped_quaternion[1]),
+            float(clamped_quaternion[2]),
+            float(clamped_quaternion[3]),
+        ],
+        dtype=np.float32,
+    )
+    gripper_action = np.asarray([float(target_gripper)], dtype=np.float32)
+    if action_layout == ACTION_LAYOUT_EEF_GRIPPER:
+        return np.concatenate([eef_action, gripper_action], axis=0).astype(np.float32)
+    return np.concatenate(
+        [eef_action, joint_action.astype(np.float32, copy=False), gripper_action],
+        axis=0,
+    ).astype(np.float32)
+
+
 def _clamp_target_jump(
     previous_position: np.ndarray | None,
     previous_quaternion: np.ndarray | None,
@@ -366,6 +457,7 @@ def _build_features(
     side_rgb_shape: tuple[int, int, int],
     fisheye_shape: tuple[int, int, int],
     tactile_shape: tuple[int, int, int],
+    action_names: list[str],
 ) -> dict[str, dict[str, Any]]:
     
     return {
@@ -416,7 +508,7 @@ def _build_features(
         },
         "action": {
             "dtype": "float32",
-            "shape": (len(ACTION_COLUMNS),),
+            "shape": (len(action_names),),
             "names": ["action"],
         },
     }
@@ -779,7 +871,9 @@ def _is_missing_value(value: str | None) -> bool:
 
 
 def convert(args: Args) -> None:
-    
+    action_layout = _validate_action_layout(args.action_layout)
+    action_names = _action_names(action_layout)
+
     input_root = args.input_root.expanduser().resolve()
     if not input_root.exists():
         raise FileNotFoundError(f"输入目录不存在：{input_root}")
@@ -810,6 +904,7 @@ def convert(args: Args) -> None:
         side_rgb_shape=tuple(sample_side_rgb.shape),
         fisheye_shape=tuple(sample_fisheye.shape),
         tactile_shape=tuple(sample_tactile.shape),
+        action_names=action_names,
     )
 
     annotations = _load_annotations(input_root / "annotations.json")
@@ -825,9 +920,20 @@ def convert(args: Args) -> None:
         print(f"  image resize           : {resize_size or 'disabled'}")
         print(f"  tactile shape          : {sample_tactile.shape}")
         print(f"  observation.state dim  : {len(STATE_COLUMNS)}")
-        print(f"  action dim             : {len(ACTION_COLUMNS)}")
+        print(f"  action layout          : {action_layout}")
+        print(f"  action dim             : {len(action_names)}")
         print(f"  action source          : {sample_action_source}")
-        print(f"  action columns         : {ACTION_COLUMNS}")
+        print(f"  action order           : {action_names}")
+        if action_layout == ACTION_LAYOUT_EEF_JOINT_GRIPPER:
+            _, joint_action_source = _extract_joint_action(
+                sample_row,
+                sample_csv,
+                rows=sample_rows,
+                frame_idx=0,
+                joint_target_shift=args.joint_target_shift,
+            )
+            print(f"  joint action source    : {joint_action_source}")
+            print(f"  joint target shift     : {args.joint_target_shift}")
         print(f"  action_config text     : {args.action_text}")
         print(f"  raw action_config      : {raw_action_config_path or 'not provided'}")
         print(f"  action_config segment  : {args.action_config_segment_frames} frames")
@@ -878,6 +984,7 @@ def convert(args: Args) -> None:
     episode_stats: list[dict[str, Any]] = []
     reconstructed_action_frames = 0
     clamped_action_frames = 0
+    joint_action_source_stats: dict[str, int] = {}
 
     for episode_dir in episode_dirs:
         csv_path = episode_dir / "teleop_log.csv"
@@ -905,6 +1012,7 @@ def convert(args: Args) -> None:
         episode_total = len(rows)
         episode_reconstructed = 0
         episode_clamped = 0
+        episode_joint_action_source_stats: dict[str, int] = {}
 
         previous_timestamp: float | None = None
         previous_clamped_position: np.ndarray | None = None
@@ -965,18 +1073,23 @@ def convert(args: Args) -> None:
                     max_rotation_step=max_rotation_step,
                 )
 
-                action = np.asarray(
-                    [
-                        float(clamped_position[0]),
-                        float(clamped_position[1]),
-                        float(clamped_position[2]),
-                        float(clamped_quaternion[0]),
-                        float(clamped_quaternion[1]),
-                        float(clamped_quaternion[2]),
-                        float(clamped_quaternion[3]),
-                        float(target_gripper),
-                    ],
-                    dtype=np.float32,
+                joint_action, joint_action_source = _extract_joint_action(
+                    row,
+                    csv_path,
+                    rows=rows,
+                    frame_idx=frame_idx,
+                    joint_target_shift=args.joint_target_shift,
+                )
+                joint_action_source_stats[joint_action_source] = joint_action_source_stats.get(joint_action_source, 0) + 1
+                episode_joint_action_source_stats[joint_action_source] = (
+                    episode_joint_action_source_stats.get(joint_action_source, 0) + 1
+                )
+                action = _build_action_vector(
+                    action_layout=action_layout,
+                    clamped_position=clamped_position,
+                    clamped_quaternion=clamped_quaternion,
+                    joint_action=joint_action,
+                    target_gripper=target_gripper,
                 )
 
                 previous_timestamp = timestamp_value
@@ -1032,11 +1145,15 @@ def convert(args: Args) -> None:
             {
                 "episode": episode_dir.name,
                 "action_source": action_source,
+                "action_layout": action_layout,
+                "action_dim": len(action_names),
                 "total_rows": episode_total,
                 "written_frames": episode_added,
                 "skipped_frames": episode_skipped,
                 "reconstructed_action_frames": episode_reconstructed,
                 "clamped_action_frames": episode_clamped,
+                "joint_target_shift": args.joint_target_shift,
+                "joint_action_source_counts": episode_joint_action_source_stats,
             }
         )
         gc.collect()
@@ -1061,6 +1178,11 @@ def convert(args: Args) -> None:
         "skipped_frames": skipped_frames,
         "reconstructed_action_frames": reconstructed_action_frames,
         "clamped_action_frames": clamped_action_frames,
+        "action_layout": action_layout,
+        "action_dim": len(action_names),
+        "action_order": action_names,
+        "joint_target_shift": args.joint_target_shift,
+        "joint_action_source_counts": joint_action_source_stats,
         "action_config": {
             "action_text": args.action_text,
             "raw_action_config_path": str(raw_action_config_path) if raw_action_config_path else None,
@@ -1081,6 +1203,7 @@ def convert(args: Args) -> None:
     print(f"写入 episode 数 : {written_episodes}")
     print(f"写入帧数        : {total_frames}")
     print(f"跳过帧数        : {skipped_frames}")
+    print(f"action layout   : {action_layout} ({len(action_names)}D)")
     print(f"输出目录        : {output_dir}")
     print(f"质检报告        : {report_path}")
     print("=" * 68)

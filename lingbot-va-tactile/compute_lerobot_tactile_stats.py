@@ -24,9 +24,9 @@ class Args:
     max_frames: int = 0
     output_json: Path = Path("lingbot-va-tactile/tactile_stats.json")
     model_action_dim: int = 30
-    # Default maps single-arm [EEF7 + gripper1] to LingBot-VA's left-arm slots:
-    # left EEF 0:7 and left gripper 28.
-    used_action_channel_ids: str = "0,1,2,3,4,5,6,28"
+    # "auto" maps 8D [EEF7 + gripper1] or 15D [EEF7 + joints7 + gripper1]
+    # to LingBot-VA's 30D left-arm slots.
+    used_action_channel_ids: str = "auto"
 
 
 def _resolve_lerobot_dataset() -> Any:
@@ -166,8 +166,32 @@ def _read_action_config_summary(root: Path) -> dict[str, Any]:
     }
 
 
+def _raw_action_order(raw_action_dim: int) -> list[str]:
+    eef = ["eef_x", "eef_y", "eef_z", "eef_qx", "eef_qy", "eef_qz", "eef_qw"]
+    joints = [f"joint_{idx}" for idx in range(1, 8)]
+    if raw_action_dim == 8:
+        return eef + ["gripper"]
+    if raw_action_dim == 15:
+        return eef + joints + ["gripper"]
+    return [f"action_{idx}" for idx in range(raw_action_dim)]
+
+
+def _auto_channel_ids(raw_action_dim: int) -> list[int]:
+    if raw_action_dim == 8:
+        return list(range(7)) + [28]
+    if raw_action_dim == 15:
+        return list(range(7)) + list(range(14, 21)) + [28]
+    raise ValueError(
+        "Cannot infer used_action_channel_ids automatically for "
+        f"raw_action_dim={raw_action_dim}. Pass --used-action-channel-ids explicitly."
+    )
+
+
 def _parse_channel_ids(value: str, raw_action_dim: int, model_action_dim: int) -> list[int]:
-    channel_ids = [int(item.strip()) for item in value.split(",") if item.strip()]
+    if value.strip().lower() == "auto":
+        channel_ids = _auto_channel_ids(raw_action_dim)
+    else:
+        channel_ids = [int(item.strip()) for item in value.split(",") if item.strip()]
     if len(channel_ids) != raw_action_dim:
         raise ValueError(
             f"used_action_channel_ids must contain {raw_action_dim} ids, got {len(channel_ids)}: {channel_ids}"
@@ -213,7 +237,7 @@ def main(args: Args) -> None:
         "tactile_shape": _read_tactile_shape(args.root, args.tactile_key),
         "action_config_summary": _read_action_config_summary(args.root),
         "action_layout": {
-            "raw_action_order": ["eef_x", "eef_y", "eef_z", "eef_qx", "eef_qy", "eef_qz", "eef_qw", "gripper"],
+            "raw_action_order": _raw_action_order(actions.shape[1]),
             "model_action_order": [
                 "left_eef_7",
                 "right_eef_7",
@@ -241,6 +265,7 @@ def main(args: Args) -> None:
         json.dump(result, handle, indent=2)
     print(f"wrote {args.output_json}")
     print(f"action_dim={result['action_dim']} tactile_dim={result['tactile_dim']} frames={frame_count}")
+    print(f"used_action_channel_ids={used_action_channel_ids}")
 
 
 if __name__ == "__main__":

@@ -196,9 +196,12 @@ python lingbot-va-tactile/inspect_raw_pika.py \
   --input-root /data/Datasets/PIKA_real_original/insert_peg_cylinder_RealMachine
 
 python lingbot-va-tactile/convert_to_lerobot.py \
-  --input-root /data/Datasets/PIKA_real_original/insert_peg_cylinder_RealMachine \
-  --repo-id local/insert-peg-cylinder-RM75B-PIKA \
-  --output-root lerobot_export_dataset \
+  --input-root /data/Datasets/PIKA_real_original/make_coffee \
+  --repo-id local/make-coffee-tactile \
+  --output-root /data/data_realworld/lerobot_export_dataset \
+  --task-name make_coffee \
+  --action-layout eef_joint_gripper \
+  --joint-target-shift 1 \
   --overwrite
 ```
 
@@ -220,9 +223,9 @@ Stats helper:
 
 ```bash
 python lingbot-va-tactile/compute_lerobot_tactile_stats.py \
-  --repo-id local/insert-peg-cylinder-RM75B-PIKA \
-  --root lerobot_export_dataset/local/insert-peg-cylinder-RM75B-PIKA \
-  --output-json lingbot-va-tactile/tactile_stats.json
+  --repo-id local/make-coffee-tactile \
+  --root /data/data_realworld/lerobot_export_dataset/local/make-coffee-tactile \
+  --output-json lingbot-va-tactile/tactile_stats_make_coffee_15d.json
 ```
 
 `robotwin_tactile_cfg.py` reads `lingbot-va-tactile/tactile_stats.json` automatically at train/server startup.
@@ -232,9 +235,9 @@ Latent extraction helper:
 ```bash
 PYTHONPATH="$PWD:$PWD/lingbot-va-tactile" \
 python lingbot-va-tactile/extract_wan_latents.py \
-  --repo-id local/insert-peg-cylinder-RM75B-PIKA \
-  --dataset-root lerobot_export_dataset/local/insert-peg-cylinder-RM75B-PIKA \
-  --wan22-pretrained-model-name-or-path /path/to/lingbot-va-or-wan22-model \
+  --repo-id local/make-coffee-tactile \
+  --dataset-root /data/data_realworld/lerobot_export_dataset/local/make-coffee-tactile \
+  --wan22-pretrained-model-name-or-path /data/lingbot-va-models/lingbot-va-base \
   --fps 10 \
   --height 256 \
   --width 256
@@ -343,3 +346,8 @@ python lingbot-va-tactile/qualitative_tactile_rollout.py \
   --num-segments 5 \
   --plot-channels
 ```
+python ./lingbot-va-tactile/visualize_raw_episode.py \
+  --episode 7 \
+  --no-display \
+  --fig-dir /data/Datasets/PIKA_real_original/long/episode7/visualization/raw_episode7_figures \
+  --output /data/Datasets/PIKA_real_original/long/episode7/visualization/raw_episode7.mp4

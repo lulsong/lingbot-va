@@ -35,11 +35,27 @@ CAMERA_COLUMNS = {
     "fisheye": "filepath_fisheye",
 }
 
+TACTILE_COLUMNS = (
+    "filepath_tactile_gripper",
+    "filepath_tactile_sense",
+)
+
+# DEFAULT_TEXTS = {
+#     "approach": "move the grasped peg toward the cylinder hole",
+#     "align": "use tactile feedback to align the peg with the hole",
+#     "insert": "insert the peg into the cylinder hole",
+#     "stabilize": "stabilize the inserted peg and stop motion",
+# }
+
 DEFAULT_TEXTS = {
-    "approach": "move the grasped peg toward the cylinder hole",
-    "align": "use tactile feedback to align the peg with the hole",
-    "insert": "insert the peg into the cylinder hole",
-    "stabilize": "stabilize the inserted peg and stop motion",
+    "S00": "Open the right door of the storage organizer.",
+    "S01": "Open the left door of the storage organizer.",
+    "S02": "Retrieve the transparent cup from the storage organizer and place it on the table.",
+    "S03": "Remove the lid from the jar and set the lid aside.",
+    "S04": "Pick up the thin utensil from the storage organizer.",
+    "S05": "Use the utensil to manipulate the contents of the open jar, then release the utensil.",
+    "S06": "Grasp the black mug, reposition it on the table, and release it.",
+    "S07": "Move the gripper away to finish the episode.",
 }
 
 
@@ -220,13 +236,15 @@ HTML_PAGE = r"""<!doctype html>
     <div class="timeline" id="timeline"></div>
     <div class="viewer">
       <div class="cameraGrid">
-        <div class="frameBox"><h3>front</h3><img id="imgFront"></div>
-        <div class="frameBox"><h3>side</h3><img id="imgSide"></div>
         <div class="frameBox"><h3>fisheye</h3><img id="imgFisheye"></div>
+        <div class="frameBox"><h3>front</h3><img id="imgFront"></div>
       </div>
-      <div class="frameBox">
-        <h3>tactile heatmap <span class="metric" id="tactileStats"></span></h3>
-        <canvas id="tactileCanvas" width="580" height="320"></canvas>
+      <div class="cameraGrid">
+        <div class="frameBox">
+          <h3>tactile heatmap <span class="metric" id="tactileStats"></span></h3>
+          <canvas id="tactileCanvas" width="580" height="320"></canvas>
+        </div>
+        <div class="frameBox"><h3>side</h3><img id="imgSide"></div>
       </div>
     </div>
   </section>
@@ -239,7 +257,7 @@ HTML_PAGE = r"""<!doctype html>
       <button onclick="markEnd()">Mark End ]</button>
       <input id="endInput" type="number" value="0">
     </div>
-    <textarea id="textInput" placeholder="action_text, e.g. use tactile feedback to align the peg with the hole"></textarea>
+    <textarea id="textInput" placeholder="action_text, e.g. Open the right door of the storage organizer."></textarea>
     <div class="row">
       <button class="primary" onclick="addSegment()">Add Segment</button>
       <button onclick="autoPegInsert()">Auto Proposal</button>
@@ -548,6 +566,41 @@ def _load_tactile(npz_path: Path) -> np.ndarray:
     return np.stack(arrays, axis=0)
 
 
+def _valid_path_value(value: Any) -> bool:
+    if value is None:
+        return False
+    text = str(value).strip()
+    return bool(text) and text.lower() not in {"n/a", "na", "none", "null", "nan"}
+
+
+def _resolve_tactile_path(episode_dir: Path, row: dict[str, str]) -> Path:
+    candidates = []
+    seen = set()
+    for column in TACTILE_COLUMNS:
+        value = row.get(column)
+        if _valid_path_value(value):
+            candidates.append((column, episode_dir / value))
+            seen.add(column)
+    for column in sorted(row):
+        if column in seen or "tactile" not in column:
+            continue
+        value = row.get(column)
+        if _valid_path_value(value):
+            candidates.append((column, episode_dir / value))
+
+    for _, path in candidates:
+        if path.exists():
+            return path
+    if candidates:
+        column, path = candidates[0]
+        raise FileNotFoundError(f"tactile file from {column} not found: {path}")
+    raise KeyError(
+        "no valid tactile path column found; tried "
+        + ", ".join(TACTILE_COLUMNS)
+        + " and fallback columns containing 'tactile'"
+    )
+
+
 def _json_response(handler: BaseHTTPRequestHandler, payload: Any, status: int = 200) -> None:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     handler.send_response(status)
@@ -628,6 +681,38 @@ def _repair_boundaries(boundaries: list[int], length: int, min_segment_frames: i
         out.pop()
     out.append(length)
     return out
+
+
+def _fit_boundaries_to_segment_count(
+    boundaries: list[int],
+    length: int,
+    min_segment_frames: int,
+    segment_count: int,
+) -> list[int]:
+    if segment_count <= 1:
+        return [0, length]
+    max_count = max(1, length // max(1, min_segment_frames))
+    target_count = min(segment_count, max_count)
+    if target_count <= 1:
+        return [0, length]
+
+    candidates = sorted(set(int(v) for v in boundaries if 0 < int(v) < length))
+    fitted = [0]
+    for idx in range(1, target_count):
+        ideal = int(round(length * idx / target_count))
+        remaining_segments = target_count - idx
+        low = fitted[-1] + min_segment_frames
+        high = length - remaining_segments * min_segment_frames
+        if low > high:
+            boundary = ideal
+        else:
+            usable = [v for v in candidates if low <= v <= high]
+            boundary = min(usable, key=lambda value: abs(value - ideal)) if usable else ideal
+            boundary = max(low, min(high, boundary))
+        fitted.append(boundary)
+        candidates = [v for v in candidates if v != boundary]
+    fitted.append(length)
+    return fitted
 
 
 def _validate_segments(segments: list[dict[str, Any]], length: int) -> list[dict[str, Any]]:
@@ -745,7 +830,7 @@ class AnnotatorState:
     def tactile(self, name: str, idx: int, mode: str = "mean") -> dict[str, Any]:
         info = self.episodes[name]
         row = info.rows[idx]
-        tactile = _load_tactile(info.path / row["filepath_tactile_gripper"])
+        tactile = _load_tactile(_resolve_tactile_path(info.path, row))
         if mode == "0":
             heat = tactile[0]
         elif mode == "1" and tactile.shape[0] > 1:
@@ -782,7 +867,7 @@ class AnnotatorState:
             except Exception:
                 action.append([0.0, 0.0, 0.0, 0.0])
             try:
-                tactile = _load_tactile(info.path / row["filepath_tactile_gripper"])
+                tactile = _load_tactile(_resolve_tactile_path(info.path, row))
                 tactile_energy.append(float(np.nanpercentile(tactile, 95)))
             except Exception:
                 tactile_energy.append(0.0)
@@ -816,15 +901,13 @@ class AnnotatorState:
         if motion_end is not None and info.length - motion_end >= self.min_segment_frames:
             boundaries.append(motion_end)
         boundaries = _repair_boundaries(boundaries, info.length, self.min_segment_frames)
-
-        if len(boundaries) - 1 <= 1:
-            texts = [DEFAULT_TEXTS["insert"]]
-        elif len(boundaries) - 1 == 2:
-            texts = [DEFAULT_TEXTS["approach"], DEFAULT_TEXTS["insert"]]
-        elif len(boundaries) - 1 == 3:
-            texts = [DEFAULT_TEXTS["approach"], DEFAULT_TEXTS["align"], DEFAULT_TEXTS["insert"]]
-        else:
-            texts = [DEFAULT_TEXTS["approach"], DEFAULT_TEXTS["align"], DEFAULT_TEXTS["insert"], DEFAULT_TEXTS["stabilize"]]
+        texts = list(DEFAULT_TEXTS.values()) or ["annotate this manipulation segment."]
+        boundaries = _fit_boundaries_to_segment_count(
+            boundaries,
+            info.length,
+            self.min_segment_frames,
+            len(texts),
+        )
 
         segments = []
         for idx in range(len(boundaries) - 1):
@@ -918,7 +1001,7 @@ def main() -> None:
     parser.add_argument(
         "--input-root",
         type=Path,
-        default=Path("/data/Datasets/PIKA_real_original/insert_peg_cylinder_RealMachine"),
+        default=Path("/data/Datasets/PIKA_real_original/make_coffee"),
     )
     parser.add_argument("--output-json", type=Path, default=None)
     parser.add_argument("--host", type=str, default="127.0.0.1")
