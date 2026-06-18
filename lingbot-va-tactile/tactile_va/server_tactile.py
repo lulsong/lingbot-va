@@ -112,10 +112,14 @@ class TactileVA_Server(VA_Server):
             self.job_config.tactile_norm_stat["q99"],
             dtype=torch.float32,
         ).reshape(1, *tactile_shape)
-        tactile_model_input = (tactile_model_input - tactile_q01) / (
-            tactile_q99 - tactile_q01 + 1e-6
-        ) * 2.0 - 1.0
+        tactile_min_range = float(getattr(self.job_config, "tactile_min_range", 1e-4))
+        tactile_range = tactile_q99 - tactile_q01
+        tactile_valid = tactile_range >= tactile_min_range
+        tactile_denom = torch.clamp(tactile_range, min=tactile_min_range)
+        tactile_model_input = (tactile_model_input - tactile_q01) / tactile_denom * 2.0 - 1.0
         tactile_model_input = tactile_model_input.clamp(-1.5, 1.5)
+        if bool(getattr(self.job_config, "tactile_mask_low_range", True)):
+            tactile_model_input = tactile_model_input * tactile_valid.to(tactile_model_input.dtype)
         return tactile_model_input.permute(1, 0, 2, 3).unsqueeze(0)
 
     def _prepare_tactile_input(self, tactile_model_input, tactile_t=0, frame_st_id=0):

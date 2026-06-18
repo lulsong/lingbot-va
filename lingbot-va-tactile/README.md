@@ -40,7 +40,7 @@ Use raw or calibrated piezoresistive values, but compute quantile normalization 
 ```python
 tactile_keys = ["observation.tactile"]
 tactile_dim = 3712
-tactile_per_frame = 16
+tactile_per_frame = 4
 tactile_norm_stat = {
     "q01": [...],  # length tactile_dim
     "q99": [...],  # length tactile_dim
@@ -101,9 +101,9 @@ python -m torch.distributed.run --nproc_per_node=1 \
   lingbot-va-tactile/tactile_va/train_tactile.py \
   --config-name robotwin_tactile_train \
   --model-path /data/lingbot-va-models/lingbot-va-base \
-  --dataset-path /data/data_realworld/lerobot_export_dataset/local/insert-peg-cylinder-realmachine \
+  --dataset-path /data/data_realworld/lerobot_export_dataset/local/make-coffee-tactile \
   --stats-json-path lingbot-va-tactile/tactile_stats.json \
-  --save-root /data/lingbot-va-models/lingbot-va-tactile-lora-ft \
+  --save-root /data/lingbot-va-models/lingbot-va-make_coffee_joint8-tactile-lora-ft \
   --batch-size 1 \
   --learning-rate 1e-5 \
   --dataset-init-worker 1 \
@@ -148,7 +148,7 @@ python -m torch.distributed.run --nproc_per_node=1 \
   lingbot-va-tactile/tactile_va/server_tactile.py \
   --config-name robotwin_tactile \
   --model-path /data/lingbot-va-models/lingbot-va-base \
-  --transformer-path /data/lingbot-va-models/lingbot-va-tactile-ft/checkpoints/checkpoint_latest \
+  --transformer-path /data/lingbot-va-models/lingbot-va-make_coffee_joint8-tactile-lora-ft/checkpoints/checkpoint_latest \
   --stats-json-path lingbot-va-tactile/tactile_stats.json \
   --port 29536
 ```
@@ -159,11 +159,12 @@ Then run the local hardware client:
 python lingbot-va-tactile/deploy_realman_tactile.py \
   --server-host 127.0.0.1 \
   --server-port 29536 \
-  --prompt "insert the peg into the cylinder hole" \
+  --prompt "make coffee following the demonstrated long-horizon manipulation stages" \
+  --action-layout joint_gripper \
   --pika-project-root /home/tujian/Projects/pika_sdk/PIKA_RM65B_data_acquisition \
-  --front-camera-id 12 \
+  --fisheye-camera-id 12 \
   --side-camera-id -1 \
-  --realsense-serial 315122271124 \
+  --front-realsense-serial 315122271404 \
   --gripper-port /dev/ttyUSB82 \
   --tactile-port 0 \
   --tactile-splitted-file config_mapping_gripper.json \
@@ -172,12 +173,47 @@ python lingbot-va-tactile/deploy_realman_tactile.py \
   --action-mode print \
   --visualize
 ```
+```bash
+cd /home/tujian/WorkTask/lingbot-va
 
-`--action-mode print` is the safe dry mode. The current tactile dataset trains
-an 8D end-effector target `[x, y, z, qx, qy, qz, qw, gripper]`; use
-`--action-mode ee_pose` only after confirming the RealMan Cartesian API method
-and orientation convention. Use `--action-mode joint` only for checkpoints
-trained with joint-space actions.
+/home/tujian/anaconda3/envs/Lingbot-va/bin/python lingbot-va-tactile/deploy_realman_tactile.py \
+  --server-host 127.0.0.1 \
+  --server-port 29536 \
+  --prompt "make coffee following the demonstrated long-horizon manipulation stages" \
+  --action-layout joint_gripper \
+  --action-mode print \
+  --feedback-mode command \
+  --max-chunks 2 \
+  --visualize
+```
+```bash
+cd /home/tujian/WorkTask/lingbot-va
+
+/home/tujian/anaconda3/envs/Lingbot-va/bin/python lingbot-va-tactile/deploy_realman_tactile.py \
+  --server-host 127.0.0.1 \
+  --server-port 29536 \
+  --prompt "make coffee following the demonstrated long-horizon manipulation stages" \
+  --action-layout joint_gripper \
+  --action-mode joint \
+  --feedback-mode measured_joint \
+  --joint-motion-method rm_movej \
+  --robot-speed 5 \
+  --control-dt 0.033333 \
+  --fisheye-camera-id 12 \
+  --side-camera-id 4 \
+  --front-realsense-serial 315122271404 \
+  --tactile-port 0 \
+  --tactile-vmax 0.3 \
+  --first-joint-delta-mode transition \
+  --visualize
+```
+
+`--action-mode print` is the safe dry mode. The current make_coffee workflow
+trains 8D joint-space actions `[joint1..joint7, gripper]`, so deployment should
+use `--action-layout joint_gripper --action-mode joint --feedback-mode measured_joint`.
+Use `--action-mode ee_pose` only for legacy checkpoints trained with end-effector
+actions after confirming the RealMan Cartesian API method and orientation
+convention.
 
 The tactile runtime path mirrors
 `/home/tujian/Projects/pika_sdk/PIKA_RM65B_data_acquisition/main_teleop.py`:
@@ -189,18 +225,21 @@ already calibrated the sensor externally.
 
 ## PIKA Real-Machine Pipeline
 
-For `/data/Datasets/PIKA_real_original/insert_peg_cylinder_RealMachine`, the raw data is compatible with the converter in this folder:
+For make_coffee retraining, regenerate the converted dataset, latents, and stats.
+The commands below intentionally overwrite generated files from previous runs:
 
 ```bash
+cd /home/tujian/WorkTask/lingbot-va
+
 python lingbot-va-tactile/inspect_raw_pika.py \
-  --input-root /data/Datasets/PIKA_real_original/insert_peg_cylinder_RealMachine
+  --input-root /data/Datasets/PIKA_real_original/make_coffee
 
 python lingbot-va-tactile/convert_to_lerobot.py \
   --input-root /data/Datasets/PIKA_real_original/make_coffee \
   --repo-id local/make-coffee-tactile \
   --output-root /data/data_realworld/lerobot_export_dataset \
   --task-name make_coffee \
-  --action-layout eef_joint_gripper \
+  --action-layout joint_gripper \
   --joint-target-shift 1 \
   --overwrite
 ```
@@ -225,10 +264,13 @@ Stats helper:
 python lingbot-va-tactile/compute_lerobot_tactile_stats.py \
   --repo-id local/make-coffee-tactile \
   --root /data/data_realworld/lerobot_export_dataset/local/make-coffee-tactile \
-  --output-json lingbot-va-tactile/tactile_stats_make_coffee_15d.json
+  --action-layout-name joint_gripper \
+  --output-json lingbot-va-tactile/tactile_stats.json
 ```
 
-`robotwin_tactile_cfg.py` reads `lingbot-va-tactile/tactile_stats.json` automatically at train/server startup.
+This overwrites the default stats file that `robotwin_tactile_cfg.py` reads at
+train/server startup. The stats helper also records low-range tactile taxels;
+the runtime masks taxels whose `q99 - q01` is below `tactile_min_range`.
 
 Latent extraction helper:
 
@@ -238,9 +280,10 @@ python lingbot-va-tactile/extract_wan_latents.py \
   --repo-id local/make-coffee-tactile \
   --dataset-root /data/data_realworld/lerobot_export_dataset/local/make-coffee-tactile \
   --wan22-pretrained-model-name-or-path /data/lingbot-va-models/lingbot-va-base \
-  --fps 10 \
+  --fps 30 \
   --height 256 \
-  --width 256
+  --width 256 \
+  --force
 ```
 
 Current inspected raw shape:
@@ -248,7 +291,7 @@ Current inspected raw shape:
 ```text
 observation.tactile = (2, 32, 58)
 tactile_dim = 3712
-action_dim = 8, padded onto LingBot-VA's 30-channel action canvas
+action_dim = 8 ([joint1..joint7, gripper]), padded onto LingBot-VA's 30-channel action canvas
 ```
 
 ## Checkpoint Compatibility
@@ -270,9 +313,9 @@ timestep so every plotted tactile frame has the same noise severity:
 
 ```bash
 python lingbot-va-tactile/validate_tactile_offline.py \
-  --checkpoint-path /data/lingbot-va-models/lingbot-va-tactile-lora-ft/checkpoints/checkpoint_latest \
+  --checkpoint-path /data/lingbot-va-models/lingbot-va-make_coffee_joint8-tactile-lora-ft/checkpoints/checkpoint_latest \
   --model-path /data/lingbot-va-models/lingbot-va-base \
-  --dataset-path /data/data_realworld/lerobot_export_dataset/local/insert-peg-cylinder-realmachine \
+  --dataset-path /data/data_realworld/lerobot_export_dataset/local/make-coffee-tactile \
   --stats-json-path lingbot-va-tactile/tactile_stats.json \
   --batch-size 1 \
   --max-batches 20 \
@@ -280,12 +323,12 @@ python lingbot-va-tactile/validate_tactile_offline.py \
   --load-worker 0 \
   --dataset-init-worker 1 \
   --fixed-tactile-timestep 200 \
-  --prediction-output-dir /data/lingbot-va-models/lingbot-va-tactile-ft/offline_predictions_fixed_t200 \
+  --prediction-output-dir /data/lingbot-va-models/lingbot-va-make_coffee_joint8-tactile-lora-ft/offline_predictions_fixed_t200 \
   --save-prediction-batches 5
 
 python lingbot-va-tactile/visualize_offline_predictions.py \
-  --input /data/lingbot-va-models/lingbot-va-tactile-ft/offline_predictions_fixed_t200 \
-  --output-dir /data/lingbot-va-models/lingbot-va-tactile-ft/offline_prediction_vis_fixed_t200 \
+  --input /data/lingbot-va-models/lingbot-va-make_coffee_joint8-tactile-lora-ft/offline_predictions_fixed_t200 \
+  --output-dir /data/lingbot-va-models/lingbot-va-make_coffee_joint8-tactile-lora-ft/offline_prediction_vis_fixed_t200 \
   --max-files 5 \
   --num-tactile-frames 0 \
   --plot-channels
@@ -301,11 +344,11 @@ predictions. All modalities are compared against the held-out continuation:
 
 ```bash
 python lingbot-va-tactile/qualitative_tactile_rollout.py \
-  --checkpoint-path /data/lingbot-va-models/lingbot-va-tactile-lora-ft/checkpoints/checkpoint_latest \
+  --checkpoint-path /data/lingbot-va-models/lingbot-va-make_coffee_joint8-tactile-lora-ft/checkpoints/checkpoint_latest \
   --model-path /data/lingbot-va-models/lingbot-va-base \
-  --dataset-path /data/data_realworld/lerobot_export_dataset/local/insert-peg-cylinder-realmachine \
+  --dataset-path /data/data_realworld/lerobot_export_dataset/local/make-coffee-tactile \
   --stats-json-path lingbot-va-tactile/tactile_stats.json \
-  --output-dir /data/lingbot-va-models/lingbot-va-tactile-lora-ft/future_tactile_figures \
+  --output-dir /data/lingbot-va-models/lingbot-va-make_coffee_joint8-tactile-lora-ft/future_tactile_figures \
   --segment-index 0 \
   --num-segments 5 \
   --context-latent-frames 1 \
@@ -320,7 +363,7 @@ python lingbot-va-tactile/qualitative_tactile_rollout.py \
 ```
 
 With the default temporal configuration, `--future-latent-frames 4` generates
-`4 * tactile_per_frame = 64` future tactile maps. Each output segment directory
+`4 * tactile_per_frame = 16` future tactile maps. Each output segment directory
 contains `future_tactile_rollout.pt`, tactile heatmaps, raw-unit action
 trajectory curves/CSV, video-latent diagnostics, and multimodal JSON metrics.
 
@@ -330,11 +373,11 @@ memory pressure during rollout:
 
 ```bash
 python lingbot-va-tactile/qualitative_tactile_rollout.py \
-  --checkpoint-path /data/lingbot-va-models/lingbot-va-tactile-lora-ft/checkpoints/checkpoint_latest \
+  --checkpoint-path /data/lingbot-va-models/lingbot-va-make_coffee_joint8-tactile-lora-ft/checkpoints/checkpoint_latest \
   --model-path /data/lingbot-va-models/lingbot-va-base \
-  --dataset-path /data/data_realworld/lerobot_export_dataset/local/insert-peg-cylinder-realmachine \
+  --dataset-path /data/data_realworld/lerobot_export_dataset/local/make-coffee-tactile \
   --stats-json-path lingbot-va-tactile/tactile_stats.json \
-  --output-dir /data/lingbot-va-models/lingbot-va-tactile-lora-ft/multimodal_rollout_figures \
+  --output-dir /data/lingbot-va-models/lingbot-va-make_coffee_joint8-tactile-lora-ft/multimodal_rollout_figures \
   --context-latent-frames 1 \
   --future-latent-frames 4 \
   --video-inference-steps 25 \

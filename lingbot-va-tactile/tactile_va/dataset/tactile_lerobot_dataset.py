@@ -101,6 +101,8 @@ class TactileLatentLeRobotDataset(LatentLeRobotDataset):
         )
         self.tactile_q01 = np.array(config.tactile_norm_stat["q01"], dtype="float32")[None]
         self.tactile_q99 = np.array(config.tactile_norm_stat["q99"], dtype="float32")[None]
+        self.tactile_min_range = float(getattr(config, "tactile_min_range", 1e-4))
+        self.tactile_mask_low_range = bool(getattr(config, "tactile_mask_low_range", True))
         if self.tactile_q01.shape[-1] != self.tactile_dim:
             raise ValueError("tactile_norm_stat['q01'] length must equal tactile_dim")
         if self.tactile_q99.shape[-1] != self.tactile_dim:
@@ -201,10 +203,14 @@ class TactileLatentLeRobotDataset(LatentLeRobotDataset):
         tactile = self._resample_tactile(tactile, required_tactile_num)
 
         tactile_flat = tactile.reshape(tactile.shape[0], -1)
-        tactile_mask = np.ones_like(tactile_flat, dtype="bool")
-        tactile_flat = (tactile_flat - self.tactile_q01) / (
-            self.tactile_q99 - self.tactile_q01 + 1e-6
-        ) * 2.0 - 1.0
+        tactile_range = self.tactile_q99 - self.tactile_q01
+        tactile_valid = tactile_range >= self.tactile_min_range
+        if self.tactile_mask_low_range:
+            tactile_mask = np.broadcast_to(tactile_valid, tactile_flat.shape).copy()
+        else:
+            tactile_mask = np.ones_like(tactile_flat, dtype="bool")
+        tactile_denom = np.maximum(tactile_range, self.tactile_min_range)
+        tactile_flat = (tactile_flat - self.tactile_q01) / tactile_denom * 2.0 - 1.0
         tactile_flat = np.clip(tactile_flat, -1.5, 1.5)
         tactile = tactile_flat.reshape(tactile.shape)
         tactile_mask = tactile_mask.reshape(tactile.shape)

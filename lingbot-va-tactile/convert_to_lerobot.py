@@ -79,20 +79,22 @@ TARGET_JOINT_COLUMNS = [
 
 ACTION_LAYOUT_EEF_GRIPPER = "eef_gripper"
 ACTION_LAYOUT_EEF_JOINT_GRIPPER = "eef_joint_gripper"
+ACTION_LAYOUT_JOINT_GRIPPER = "joint_gripper"
 ACTION_LAYOUT_CHOICES = {
     ACTION_LAYOUT_EEF_GRIPPER,
     ACTION_LAYOUT_EEF_JOINT_GRIPPER,
+    ACTION_LAYOUT_JOINT_GRIPPER,
 }
 
 
 @dataclass
 class Args:
-    input_root: Path = Path("/data/Datasets/PIKA_real_original/insert_peg_cylinder_RealMachine")
-    repo_id: str = "local/insert-peg-cylinder-realmachine"
+    input_root: Path = Path("/data/Datasets/PIKA_real_original/make_coffee")
+    repo_id: str = "local/make-coffee-tactile"
     output_root: Path = Path("/data/data_realworld/lerobot_export_dataset")
     fps: int = 30
     robot_type: str = "rm75b"
-    task_name: str = "insert_peg_cylinder"
+    task_name: str = "make_coffee"
     overwrite: bool = False
     push_to_hub: bool = False
     private_hub_repo: bool = False
@@ -104,7 +106,7 @@ class Args:
     image_writer_processes: int = 0
     metadata_buffer_size: int = 1
     parallel_video_encoding: bool = False
-    action_text: str = "insert the peg into the cylinder hole"
+    action_text: str = "make coffee following the demonstrated long-horizon manipulation stages"
     raw_action_config_path: Path | None = None
     action_config_segment_frames: int = 243
     action_config_min_segment_frames: int = 30
@@ -112,7 +114,7 @@ class Args:
     action_zero_pose_window: int = 5
     action_clamp_position_mps: float = 0.5
     action_clamp_rotation_rps: float = 1.0
-    action_layout: str = ACTION_LAYOUT_EEF_GRIPPER
+    action_layout: str = ACTION_LAYOUT_JOINT_GRIPPER
     joint_target_shift: int = 1
     dry_run: bool = False
 
@@ -361,6 +363,8 @@ def _action_names(action_layout: str) -> list[str]:
     if action_layout == ACTION_LAYOUT_EEF_GRIPPER:
         return eef_names + ["gripper"]
     joint_names = [f"joint_{idx}" for idx in range(1, 8)]
+    if action_layout == ACTION_LAYOUT_JOINT_GRIPPER:
+        return joint_names + ["gripper"]
     return eef_names + joint_names + ["gripper"]
 
 
@@ -412,6 +416,11 @@ def _build_action_vector(
     gripper_action = np.asarray([float(target_gripper)], dtype=np.float32)
     if action_layout == ACTION_LAYOUT_EEF_GRIPPER:
         return np.concatenate([eef_action, gripper_action], axis=0).astype(np.float32)
+    if action_layout == ACTION_LAYOUT_JOINT_GRIPPER:
+        return np.concatenate(
+            [joint_action.astype(np.float32, copy=False), gripper_action],
+            axis=0,
+        ).astype(np.float32)
     return np.concatenate(
         [eef_action, joint_action.astype(np.float32, copy=False), gripper_action],
         axis=0,

@@ -30,8 +30,8 @@ except Exception:
 
 @dataclass
 class Args:
-    repo_id: str = "local/insert-peg-cylinder-realmachine"
-    dataset_root: Path = Path("/data/data_realworld/lerobot_export_dataset/local/insert-peg-cylinder-realmachine")
+    repo_id: str = "local/make-coffee-tactile"
+    dataset_root: Path = Path("/data/data_realworld/lerobot_export_dataset/local/make-coffee-tactile")
     wan22_pretrained_model_name_or_path: Path = Path("/data/lingbot-va-models/lingbot-va-base")
     obs_cam_keys: list[str] = field(
         default_factory=lambda: [
@@ -40,7 +40,7 @@ class Args:
             "observation.images.cam_fisheye",
         ]
     )
-    fps: int = 10
+    fps: int = 30
     height: int = 256
     width: int = 256
     max_episodes: int = 0

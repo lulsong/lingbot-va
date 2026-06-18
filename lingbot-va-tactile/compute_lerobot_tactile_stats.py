@@ -18,14 +18,15 @@ import tyro
 
 @dataclass
 class Args:
-    repo_id: str = "local/insert-peg-cylinder-realmachine"
-    root: Path = Path("/data/data_realworld/lerobot_export_dataset/local/insert-peg-cylinder-realmachine")
+    repo_id: str = "local/make-coffee-tactile"
+    root: Path = Path("/data/data_realworld/lerobot_export_dataset/local/make-coffee-tactile")
     tactile_key: str = "observation.tactile"
     max_frames: int = 0
     output_json: Path = Path("lingbot-va-tactile/tactile_stats.json")
     model_action_dim: int = 30
-    # "auto" maps 8D [EEF7 + gripper1] or 15D [EEF7 + joints7 + gripper1]
-    # to LingBot-VA's 30D left-arm slots.
+    action_layout_name: str = "joint_gripper"
+    tactile_min_range: float = 1e-4
+    # "auto" maps the selected raw action layout to LingBot-VA's 30D left-arm slots.
     used_action_channel_ids: str = "auto"
 
 
@@ -166,30 +167,40 @@ def _read_action_config_summary(root: Path) -> dict[str, Any]:
     }
 
 
-def _raw_action_order(raw_action_dim: int) -> list[str]:
+def _raw_action_order(raw_action_dim: int, action_layout_name: str) -> list[str]:
     eef = ["eef_x", "eef_y", "eef_z", "eef_qx", "eef_qy", "eef_qz", "eef_qw"]
     joints = [f"joint_{idx}" for idx in range(1, 8)]
-    if raw_action_dim == 8:
+    if action_layout_name == "joint_gripper" and raw_action_dim == 8:
+        return joints + ["gripper"]
+    if action_layout_name == "eef_gripper" and raw_action_dim == 8:
         return eef + ["gripper"]
-    if raw_action_dim == 15:
+    if action_layout_name == "eef_joint_gripper" and raw_action_dim == 15:
         return eef + joints + ["gripper"]
     return [f"action_{idx}" for idx in range(raw_action_dim)]
 
 
-def _auto_channel_ids(raw_action_dim: int) -> list[int]:
-    if raw_action_dim == 8:
+def _auto_channel_ids(raw_action_dim: int, action_layout_name: str) -> list[int]:
+    if action_layout_name == "joint_gripper" and raw_action_dim == 8:
+        return list(range(14, 21)) + [28]
+    if action_layout_name == "eef_gripper" and raw_action_dim == 8:
         return list(range(7)) + [28]
-    if raw_action_dim == 15:
+    if action_layout_name == "eef_joint_gripper" and raw_action_dim == 15:
         return list(range(7)) + list(range(14, 21)) + [28]
     raise ValueError(
         "Cannot infer used_action_channel_ids automatically for "
-        f"raw_action_dim={raw_action_dim}. Pass --used-action-channel-ids explicitly."
+        f"action_layout_name={action_layout_name!r}, raw_action_dim={raw_action_dim}. "
+        "Pass --used-action-channel-ids explicitly or regenerate with --action-layout joint_gripper."
     )
 
 
-def _parse_channel_ids(value: str, raw_action_dim: int, model_action_dim: int) -> list[int]:
+def _parse_channel_ids(
+    value: str,
+    raw_action_dim: int,
+    model_action_dim: int,
+    action_layout_name: str,
+) -> list[int]:
     if value.strip().lower() == "auto":
-        channel_ids = _auto_channel_ids(raw_action_dim)
+        channel_ids = _auto_channel_ids(raw_action_dim, action_layout_name)
     else:
         channel_ids = [int(item.strip()) for item in value.split(",") if item.strip()]
     if len(channel_ids) != raw_action_dim:
@@ -206,6 +217,25 @@ def _parse_channel_ids(value: str, raw_action_dim: int, model_action_dim: int) -
     return channel_ids
 
 
+def _validate_action_layout_name(action_layout_name: str, raw_action_dim: int) -> None:
+    expected_dims = {
+        "joint_gripper": 8,
+        "eef_gripper": 8,
+        "eef_joint_gripper": 15,
+    }
+    if action_layout_name not in expected_dims:
+        raise ValueError(
+            f"Unsupported action_layout_name={action_layout_name!r}; "
+            f"choose from {sorted(expected_dims)}"
+        )
+    expected_dim = expected_dims[action_layout_name]
+    if raw_action_dim != expected_dim:
+        raise ValueError(
+            f"action_layout_name={action_layout_name!r} expects action_dim={expected_dim}, "
+            f"got {raw_action_dim}. Do not mix old EEF/15D stats with joint_gripper training."
+        )
+
+
 def main(args: Args) -> None:
     loaded = _load_from_local_parquet(args)
     if loaded is None:
@@ -213,6 +243,7 @@ def main(args: Args) -> None:
 
     actions, tactile = loaded
     frame_count = actions.shape[0]
+    _validate_action_layout_name(args.action_layout_name, actions.shape[1])
 
     action_q01 = np.quantile(actions, 0.01, axis=0).astype(np.float32)
     action_q99 = np.quantile(actions, 0.99, axis=0).astype(np.float32)
@@ -220,6 +251,7 @@ def main(args: Args) -> None:
         args.used_action_channel_ids,
         raw_action_dim=actions.shape[1],
         model_action_dim=args.model_action_dim,
+        action_layout_name=args.action_layout_name,
     )
     padded_action_q01 = np.zeros(args.model_action_dim, dtype=np.float32)
     padded_action_q99 = np.zeros(args.model_action_dim, dtype=np.float32)
@@ -227,17 +259,25 @@ def main(args: Args) -> None:
         padded_action_q01[model_idx] = action_q01[raw_idx]
         padded_action_q99[model_idx] = action_q99[raw_idx]
 
+    tactile_q01 = np.quantile(tactile, 0.01, axis=0).astype(np.float32)
+    tactile_q99 = np.quantile(tactile, 0.99, axis=0).astype(np.float32)
+    tactile_range = tactile_q99 - tactile_q01
+    low_range_taxels = int((tactile_range < float(args.tactile_min_range)).sum())
+
     result = {
         "repo_id": args.repo_id,
         "root": str(args.root.expanduser().resolve()),
         "num_frames": int(frame_count),
         "action_dim": int(actions.shape[1]),
+        "action_layout_name": args.action_layout_name,
         "model_action_dim": int(args.model_action_dim),
         "tactile_dim": int(tactile.shape[1]),
         "tactile_shape": _read_tactile_shape(args.root, args.tactile_key),
+        "tactile_min_range": float(args.tactile_min_range),
+        "tactile_low_range_taxels": low_range_taxels,
         "action_config_summary": _read_action_config_summary(args.root),
         "action_layout": {
-            "raw_action_order": _raw_action_order(actions.shape[1]),
+            "raw_action_order": _raw_action_order(actions.shape[1], args.action_layout_name),
             "model_action_order": [
                 "left_eef_7",
                 "right_eef_7",
@@ -254,8 +294,8 @@ def main(args: Args) -> None:
             "q99": padded_action_q99.astype(float).tolist(),
         },
         "tactile_norm_stat": {
-            "q01": np.quantile(tactile, 0.01, axis=0).astype(float).tolist(),
-            "q99": np.quantile(tactile, 0.99, axis=0).astype(float).tolist(),
+            "q01": tactile_q01.astype(float).tolist(),
+            "q99": tactile_q99.astype(float).tolist(),
         },
     }
 
@@ -266,6 +306,7 @@ def main(args: Args) -> None:
     print(f"wrote {args.output_json}")
     print(f"action_dim={result['action_dim']} tactile_dim={result['tactile_dim']} frames={frame_count}")
     print(f"used_action_channel_ids={used_action_channel_ids}")
+    print(f"tactile_low_range_taxels={low_range_taxels}")
 
 
 if __name__ == "__main__":

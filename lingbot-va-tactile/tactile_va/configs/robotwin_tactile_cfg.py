@@ -12,7 +12,7 @@ robotwin_tactile_cfg.__name__ = "Config: VA PA-STE tactile"
 robotwin_tactile_cfg.wan22_pretrained_model_name_or_path = "/path/to/pretrained/model"
 robotwin_tactile_cfg.transformer_path = None
 robotwin_tactile_cfg.infer_mode = "server"
-robotwin_tactile_cfg.prompt = "insert the peg into the cylinder hole"
+robotwin_tactile_cfg.prompt = "make coffee following the demonstrated long-horizon manipulation stages"
 
 robotwin_tactile_cfg.attn_window = 30
 robotwin_tactile_cfg.frame_chunk_size = 4
@@ -21,7 +21,10 @@ robotwin_tactile_cfg.env_type = "none"
 robotwin_tactile_cfg.height = 256
 robotwin_tactile_cfg.width = 256
 robotwin_tactile_cfg.action_dim = 30
-robotwin_tactile_cfg.action_per_frame = 16
+# Default tactile real-machine data is converted at 30Hz and Wan latent
+# extraction defaults to 30fps. Wan consumes 4 raw frames per latent frame, so
+# each latent frame carries 4 action/tactile control steps.
+robotwin_tactile_cfg.action_per_frame = 4
 robotwin_tactile_cfg.obs_cam_keys = [
     "observation.images.cam_front",
     "observation.images.cam_side",
@@ -36,13 +39,14 @@ robotwin_tactile_cfg.action_num_inference_steps = 50
 robotwin_tactile_cfg.snr_shift = 5.0
 robotwin_tactile_cfg.action_snr_shift = 1.0
 
-# convert_to_lerobot.py writes single-arm action:
-# [x, y, z, qx, qy, qz, qw, gripper_distance_mm]
+# convert_to_lerobot.py defaults to joint-only single-arm action:
+# [joint1, joint2, ..., joint7, gripper_distance_mm].
 # LingBot-VA's 30D convention is:
 # left EEF 0:7, right EEF 7:14, left joints 14:21,
 # right joints 21:28, left gripper 28, right gripper 29.
 # This dataset is single-arm, so we map it to the left-arm slots.
-robotwin_tactile_cfg.used_action_channel_ids = list(range(7)) + [28]
+robotwin_tactile_cfg.action_layout_name = "joint_gripper"
+robotwin_tactile_cfg.used_action_channel_ids = list(range(14, 21)) + [28]
 inverse_used_action_channel_ids = [len(robotwin_tactile_cfg.used_action_channel_ids)] * robotwin_tactile_cfg.action_dim
 for i, j in enumerate(robotwin_tactile_cfg.used_action_channel_ids):
     inverse_used_action_channel_ids[j] = i
@@ -51,8 +55,8 @@ robotwin_tactile_cfg.action_norm_method = "quantiles"
 _default_action_q01 = [0.0] * robotwin_tactile_cfg.action_dim
 _default_action_q99 = [0.0] * robotwin_tactile_cfg.action_dim
 for _raw_idx, _model_idx in enumerate(robotwin_tactile_cfg.used_action_channel_ids):
-    _default_action_q01[_model_idx] = -1.0 if _raw_idx < 7 else 0.0
-    _default_action_q99[_model_idx] = 1.0 if _raw_idx < 7 else 100.0
+    _default_action_q01[_model_idx] = -180.0 if _raw_idx < 7 else 0.0
+    _default_action_q99[_model_idx] = 180.0 if _raw_idx < 7 else 100.0
 robotwin_tactile_cfg.norm_stat = {
     # Replaced by tactile_stats.json before serious training.
     "q01": _default_action_q01,
@@ -71,6 +75,8 @@ robotwin_tactile_cfg.tactile_norm_stat = {
     "q01": [0.0] * robotwin_tactile_cfg.tactile_dim,
     "q99": [1.0] * robotwin_tactile_cfg.tactile_dim,
 }
+robotwin_tactile_cfg.tactile_min_range = 1e-4
+robotwin_tactile_cfg.tactile_mask_low_range = True
 robotwin_tactile_cfg.tactile_snr_shift = robotwin_tactile_cfg.action_snr_shift
 robotwin_tactile_cfg.tactile_noisy_cond_prob = 0.5
 robotwin_tactile_cfg.tactile_num_inference_steps = robotwin_tactile_cfg.action_num_inference_steps
@@ -82,6 +88,21 @@ robotwin_tactile_cfg.tactile_contact_loss_weight = 0.1
 robotwin_tactile_cfg.tactile_temporal_loss_weight = 0.1
 robotwin_tactile_cfg.tactile_contact_threshold = 0.05
 robotwin_tactile_cfg.stats_json_path = "lingbot-va-tactile/tactile_stats.json"
+
+
+robotwin_tactile_lowmem_cfg = EasyDict(deepcopy(robotwin_tactile_cfg))
+robotwin_tactile_lowmem_cfg.__name__ = "Config: VA PA-STE tactile low-memory inference"
+# Low-memory server profile for single 48 GB GPUs. This preserves the tactile
+# prediction branch but shortens rollout chunks, diffusion sampling, and cache.
+robotwin_tactile_lowmem_cfg.enable_offload = False
+robotwin_tactile_lowmem_cfg.attn_window = 12
+robotwin_tactile_lowmem_cfg.frame_chunk_size = 4
+robotwin_tactile_lowmem_cfg.guidance_scale = 1
+robotwin_tactile_lowmem_cfg.action_guidance_scale = 1
+robotwin_tactile_lowmem_cfg.tactile_guidance_scale = 1
+robotwin_tactile_lowmem_cfg.num_inference_steps = 20
+robotwin_tactile_lowmem_cfg.action_num_inference_steps = 20
+robotwin_tactile_lowmem_cfg.tactile_num_inference_steps = 20
 
 
 robotwin_tactile_train_cfg = EasyDict(deepcopy(robotwin_tactile_cfg))
