@@ -133,4 +133,4 @@ robotwin_tactile_train_cfg.weight_decay = 0.1
 robotwin_tactile_train_cfg.warmup_steps = 10
 robotwin_tactile_train_cfg.batch_size = 1
 robotwin_tactile_train_cfg.gradient_accumulation_steps = 1
-robotwin_tactile_train_cfg.num_steps = 3000
+robotwin_tactile_train_cfg.num_steps = 50000
