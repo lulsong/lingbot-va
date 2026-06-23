@@ -16,6 +16,8 @@ import gc
 import json
 import os
 import random
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -702,11 +704,58 @@ def _plot_decoded_video(pred, target, output_path, num_frames):
     plt.close(fig)
 
 
-def _write_decoded_videos(pred, target, output_dir, fps):
-    from diffusers.utils import export_to_video
+def _to_uint8_video(frames):
+    frames = np.asarray(frames)
+    if frames.dtype != np.uint8:
+        if float(np.nanmax(frames)) <= 1.5:
+            frames = frames * 255.0
+        frames = np.clip(frames, 0, 255).astype(np.uint8)
+    return np.ascontiguousarray(frames)
 
-    export_to_video(list(pred), str(output_dir / "video_prediction.mp4"), fps=fps)
-    export_to_video(list(target), str(output_dir / "video_ground_truth.mp4"), fps=fps)
+
+def _write_video_with_ffmpeg(frames, output_path, fps):
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise RuntimeError(
+            "--save-video-mp4 requires either system ffmpeg on PATH or the "
+            "imageio-ffmpeg Python package."
+        )
+
+    frames = _to_uint8_video(frames)
+    if frames.ndim != 4 or frames.shape[-1] != 3:
+        raise ValueError(f"Expected RGB video frames with shape [T, H, W, 3], got {frames.shape}")
+    height, width = frames.shape[1:3]
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-f",
+        "rawvideo",
+        "-vcodec",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        "-s",
+        f"{width}x{height}",
+        "-r",
+        str(fps),
+        "-i",
+        "-",
+        "-an",
+        "-vcodec",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        str(output_path),
+    ]
+    proc = subprocess.run(cmd, input=frames.tobytes(), capture_output=True, check=False)
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"ffmpeg failed while writing {output_path}: {stderr}")
+
+
+def _write_decoded_videos(pred, target, output_dir, fps):
+    _write_video_with_ffmpeg(pred, output_dir / "video_prediction.mp4", fps)
+    _write_video_with_ffmpeg(target, output_dir / "video_ground_truth.mp4", fps)
 
 
 def _save_outputs(result, output_dir, segment_index, args):

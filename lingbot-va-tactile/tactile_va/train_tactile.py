@@ -3,6 +3,7 @@ import gc
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -278,9 +279,41 @@ class TactileTrainer(BaseTrainer):
         self.train_scheduler_action.set_timesteps(1000, training=True)
         self.train_scheduler_tactile.set_timesteps(1000, training=True)
 
-        self.save_dir = Path(config.save_root) / "checkpoints"
+        self.output_dir = Path(config.save_root).expanduser()
+        self.save_dir = self.output_dir / "checkpoints"
         self.save_dir.mkdir(parents=True, exist_ok=True)
+        self.metrics_file = None
+        self.metrics_run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        if config.rank == 0:
+            metrics_path = self.output_dir / "train_metrics.jsonl"
+            self.metrics_file = metrics_path.open("a", encoding="utf-8")
+            logger.info(f"Writing local training metrics to {metrics_path}")
         self.gradient_accumulation_steps = getattr(config, "gradient_accumulation_steps", 1)
+
+    def _write_local_metrics(
+        self,
+        latent_loss,
+        action_loss,
+        tactile_loss,
+        max_tactile_loss,
+        grad_norm,
+        lr,
+    ):
+        if self.metrics_file is None:
+            return
+        payload = {
+            "time": datetime.now(timezone.utc).isoformat(),
+            "run_id": self.metrics_run_id,
+            "step": int(self.step),
+            "video_loss": float(latent_loss),
+            "action_loss": float(action_loss),
+            "tactile_loss": float(tactile_loss),
+            "max_tactile_loss": float(max_tactile_loss),
+            "grad_norm": float(grad_norm),
+            "lr": float(lr),
+        }
+        self.metrics_file.write(json.dumps(payload, sort_keys=True) + "\n")
+        self.metrics_file.flush()
 
     @torch.no_grad()
     def _crop_training_batch(self, batch_dict):
@@ -641,6 +674,14 @@ class TactileTrainer(BaseTrainer):
                             "lr": f"{self.lr_scheduler.get_last_lr()[0]:.2e}",
                         }
                     )
+                    self._write_local_metrics(
+                        latent_loss_show,
+                        action_loss_show,
+                        tactile_loss_show,
+                        max_tactile_loss_show,
+                        losses["total_norm"].item(),
+                        self.lr_scheduler.get_last_lr()[0],
+                    )
                     if self.wandb is not None:
                         self.wandb.log(
                             {
@@ -662,6 +703,9 @@ class TactileTrainer(BaseTrainer):
                 dist.barrier()
 
         progress_bar.close()
+        if self.metrics_file is not None:
+            self.metrics_file.close()
+            self.metrics_file = None
         logger.info("Tactile training completed.")
 
 
