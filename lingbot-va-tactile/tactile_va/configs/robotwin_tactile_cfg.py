@@ -95,7 +95,7 @@ robotwin_tactile_lowmem_cfg.__name__ = "Config: VA PA-STE tactile low-memory inf
 # Low-memory server profile for single 48 GB GPUs. This preserves the tactile
 # prediction branch but shortens rollout chunks, diffusion sampling, and cache.
 robotwin_tactile_lowmem_cfg.enable_offload = False
-robotwin_tactile_lowmem_cfg.attn_window = 12
+robotwin_tactile_lowmem_cfg.attn_window = 30
 robotwin_tactile_lowmem_cfg.frame_chunk_size = 4
 robotwin_tactile_lowmem_cfg.guidance_scale = 1
 robotwin_tactile_lowmem_cfg.action_guidance_scale = 1

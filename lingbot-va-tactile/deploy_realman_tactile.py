@@ -1202,16 +1202,22 @@ class RealmanPikaHardware:
             return np.asarray(self.last_joint_command, dtype=np.float32).copy()
         return self.get_joint_state().astype(np.float32, copy=False)
 
-    def _transition_to_first_joint_target(self, current: np.ndarray, target: np.ndarray, gripper: float) -> None:
+    def _transition_to_joint_target(
+        self,
+        current: np.ndarray,
+        target: np.ndarray,
+        gripper: float,
+        reason: str,
+    ) -> None:
         max_step = float(self.args.max_joint_step_deg)
         if max_step <= 0:
-            raise RuntimeError("--first-joint-delta-mode transition requires --max-joint-step-deg > 0")
+            raise RuntimeError("joint transition requires --max-joint-step-deg > 0")
 
         delta = target - current
         steps = int(np.ceil(float(np.max(np.abs(delta))) / max_step))
         steps = max(1, steps)
         print(
-            "[SAFETY] first joint target is far from current state; "
+            f"[SAFETY] {reason}; "
             f"transitioning in {steps} step(s), max_joint_step_deg={max_step}"
         )
         transition_dt = max(float(self.args.joint_transition_dt), 0.0)
@@ -1221,6 +1227,14 @@ class RealmanPikaHardware:
             self._send_joint_target(waypoint.astype(np.float32), gripper)
             if transition_dt > 0 and idx < steps:
                 time.sleep(transition_dt)
+
+    def _transition_to_first_joint_target(self, current: np.ndarray, target: np.ndarray, gripper: float) -> None:
+        self._transition_to_joint_target(
+            current,
+            target,
+            gripper,
+            reason="first joint target is far from current state",
+        )
 
     def _handle_first_joint_target(self, target: np.ndarray, gripper: float) -> bool:
         if self._first_joint_command_checked:
@@ -1251,7 +1265,7 @@ class RealmanPikaHardware:
             raise ReplanRequested("first joint transition complete; discard stale chunk and infer fresh chunk")
         raise ValueError(f"Unknown first_joint_delta_mode={self.args.first_joint_delta_mode!r}")
 
-    def _limit_joint_step(self, target: np.ndarray) -> np.ndarray:
+    def _limit_joint_step(self, target: np.ndarray, gripper: float) -> np.ndarray | None:
         max_step = float(self.args.max_joint_step_deg)
         if max_step <= 0:
             return target
@@ -1261,19 +1275,37 @@ class RealmanPikaHardware:
         if max_abs <= max_step:
             return target
 
-        limited = current + np.clip(delta, -max_step, max_step)
-        print(
-            "[SAFETY] joint command clamped: "
-            f"max_delta={max_abs:.2f}deg, max_joint_step_deg={max_step:.2f}"
-        )
-        return limited.astype(np.float32, copy=False)
+        axis = int(np.argmax(np.abs(delta))) + 1
+        if self.args.joint_step_limit_mode == "clamp":
+            limited = current + np.clip(delta, -max_step, max_step)
+            print(
+                "[SAFETY] joint command clamped: "
+                f"max_delta={max_abs:.2f}deg on joint {axis}, max_joint_step_deg={max_step:.2f}"
+            )
+            return limited.astype(np.float32, copy=False)
+        if self.args.joint_step_limit_mode == "transition":
+            self._transition_to_joint_target(
+                current,
+                target,
+                gripper,
+                reason=(
+                    "joint command exceeds step limit: "
+                    f"max_delta={max_abs:.2f}deg on joint {axis}, "
+                    f"max_joint_step_deg={max_step:.2f}, "
+                    f"current={np.round(current, 3).tolist()}, target={np.round(target, 3).tolist()}"
+                ),
+            )
+            return None
+        raise ValueError(f"Unknown joint_step_limit_mode={self.args.joint_step_limit_mode!r}")
 
     def move_joints(self, joints: np.ndarray, gripper: float):
         target_joints = np.asarray(joints, dtype=np.float32).reshape(7)
         target_gripper = self._limit_gripper_step(self._clip_gripper(gripper))
         if self._handle_first_joint_target(target_joints, target_gripper):
             return
-        safe_joints = self._limit_joint_step(target_joints)
+        safe_joints = self._limit_joint_step(target_joints, target_gripper)
+        if safe_joints is None:
+            return
         self._send_joint_target(safe_joints, target_gripper)
 
     def read_tactile(self) -> np.ndarray:
@@ -1774,6 +1806,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--joint-motion-method", choices=["rm_movej", "rm_movej_canfd"], default="rm_movej")
     parser.add_argument("--max-joint-step-deg", type=float, default=1.0)
+    parser.add_argument("--joint-step-limit-mode", choices=["clamp", "transition"], default="clamp")
     parser.add_argument("--first-joint-delta-limit-deg", type=float, default=8.0)
     parser.add_argument("--first-joint-delta-mode", choices=["abort", "transition"], default="abort")
     parser.add_argument("--joint-transition-dt", type=float, default=0.05)
@@ -1807,6 +1840,8 @@ def main():
         raise ValueError("--joint-transition-dt must be non-negative")
     if args.first_joint_delta_mode == "transition" and args.max_joint_step_deg <= 0:
         raise ValueError("--first-joint-delta-mode transition requires --max-joint-step-deg > 0")
+    if args.joint_step_limit_mode == "transition" and args.max_joint_step_deg <= 0:
+        raise ValueError("--joint-step-limit-mode transition requires --max-joint-step-deg > 0")
     if args.feedback_mode != "command" and args.action_mode == "print":
         print(
             f"[WARN] --feedback-mode {args.feedback_mode} with --action-mode print reads current hardware state "

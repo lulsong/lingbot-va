@@ -211,6 +211,9 @@ cd /home/tujian/WorkTask/lingbot-va
 `--action-mode print` is the safe dry mode. The current make_coffee workflow
 trains 8D joint-space actions `[joint1..joint7, gripper]`, so deployment should
 use `--action-layout joint_gripper --action-mode joint --feedback-mode measured_joint`.
+Use `--joint-step-limit-mode clamp` to clip non-initial jumps to
+`--max-joint-step-deg`, or `--joint-step-limit-mode transition` to walk to that
+target in bounded joint steps and continue the current chunk.
 Use `--action-mode ee_pose` only for legacy checkpoints trained with end-effector
 actions after confirming the RealMan Cartesian API method and orientation
 convention.
