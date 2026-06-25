@@ -234,8 +234,16 @@ cd /home/tujian/WorkTask/lingbot-va
 python lingbot-va-tactile/inspect_raw_pika.py \
   --input-root /data/Datasets/PIKA_real_original/make_coffee
 
-python lingbot-va-tactile/convert_to_lerobot.py \
+# Optional: create an accelerated raw dataset by keeping every 2nd frame.
+python lingbot-va-tactile/downsample_raw_dataset.py \
   --input-root /data/Datasets/PIKA_real_original/make_coffee \
+  --output-root /data/Datasets/PIKA_real_original/make_coffee_stride2 \
+  --stride 2 \
+  --output-fps 30 \
+  --overwrite
+
+python lingbot-va-tactile/convert_to_lerobot.py \
+  --input-root /data/Datasets/PIKA_real_original/make_coffee_stride2 \
   --repo-id local/make-coffee-tactile \
   --output-root /data/data_realworld/lerobot_export_dataset \
   --task-name make_coffee \
@@ -394,3 +402,38 @@ python ./lingbot-va-tactile/visualize_raw_episode.py \
   --no-display \
   --fig-dir /data/Datasets/PIKA_real_original/long/episode7/visualization/raw_episode7_figures \
   --output /data/Datasets/PIKA_real_original/long/episode7/visualization/raw_episode7.mp4
+
+### Single-Step Multimodal Diagnostic
+
+Use `single_step_multimodal_check.py` to inspect local one-step dynamics. It
+conditions on one latent frame `t`, predicts only `t+1`, and writes detailed
+video/tactile/action comparisons against the dataset continuation:
+
+```bash
+PYTHONNOUSERSITE=1 /home/tujian/anaconda3/envs/Lingbot-va/bin/python \
+  lingbot-va-tactile/single_step_multimodal_check.py \
+  --checkpoint-path /data/lingbot-va-models/lingbot-va-make-coffee-80-1100/checkpoints/checkpoint_latest \
+  --model-path /data/lingbot-va-models/lingbot-va-base \
+  --dataset-path /data/data_realworld/lerobot_export_dataset/local/make-coffee-tactile \
+  --stats-json-path lingbot-va-tactile/tactile_stats.json \
+  --output-dir /data/lingbot-va-models/lingbot-va-tactile-ft/single_step_multimodal_checks \
+  --segment-index 0 \
+  --latent-index 0 \
+  --num-latent-steps 16 \
+  --video-inference-steps 25 \
+  --tactile-inference-steps 50 \
+  --action-inference-steps 50 \
+  --decode-video \
+  --video-decode-device cpu \
+  --save-video-mp4 \
+  --plot-channels
+```
+
+Each output directory contains `single_step_metrics.json`,
+`video_latent_single_step.png`, optional decoded video figures/MP4s,
+`tactile_single_step_mean.png`, per-sheet tactile heatmaps, and
+`action_single_step.png`. When `--num-latent-steps` is greater than 1, the
+script runs independent `t -> t+1` checks over the requested latent-index
+range and also writes summary grids such as `video_decoded_grid.png`,
+`video_latent_grid.png`, `tactile_grid_mean.png`, `action_grid.png`, and
+`metrics_grid.png`.
