@@ -475,6 +475,10 @@ class TactileFutureRollout:
         start = context_frames * tactile_per_frame
         end = (context_frames + future_frames) * tactile_per_frame
         target_tactile = batch["tactile"][:, :, start:end]
+        context_tactile_mask = batch["tactile_mask"][
+            :, :, : context_frames * tactile_per_frame
+        ]
+        target_tactile_mask = batch["tactile_mask"][:, :, start:end]
         target_actions = batch["actions"][:, :, context_frames : context_frames + future_frames]
         target_action_mask = batch["actions_mask"][
             :, list(self.config.used_action_channel_ids), context_frames : context_frames + future_frames, :, 0
@@ -483,6 +487,8 @@ class TactileFutureRollout:
             "tactile_context_norm": context_tactile,
             "tactile_pred_norm": predicted_tactile,
             "tactile_target_norm": target_tactile,
+            "tactile_context_mask": context_tactile_mask,
+            "tactile_target_mask": target_tactile_mask,
             "tactile_context_raw": self._denormalize_tactile(context_tactile),
             "tactile_pred_raw": self._denormalize_tactile(predicted_tactile),
             "tactile_target_raw": self._denormalize_tactile(target_tactile),
@@ -512,6 +518,29 @@ def _write_summary_csv(pred, target, output_path):
         writer.writerow(["t", "target_mean_pressure", "pred_mean_pressure", "mae"])
         for frame in range(pred.shape[1]):
             writer.writerow([frame, target_mean[frame], pred_mean[frame], mae[frame]])
+
+
+def _apply_tactile_mask(value, mask):
+    if mask is None:
+        return value
+    return value * mask.astype(value.dtype)
+
+
+def _masked_tactile_arrays_from_payload(payload):
+    context = payload["tactile_context_raw"][0].float().numpy()
+    pred = payload["tactile_pred_raw"][0].float().numpy()
+    target = payload["tactile_target_raw"][0].float().numpy()
+    context_mask = payload.get("tactile_context_mask")
+    target_mask = payload.get("tactile_target_mask")
+    if torch.is_tensor(context_mask):
+        context_mask = context_mask[0].cpu().numpy().astype(bool)
+    if torch.is_tensor(target_mask):
+        target_mask = target_mask[0].cpu().numpy().astype(bool)
+    return (
+        _apply_tactile_mask(context, context_mask),
+        _apply_tactile_mask(pred, target_mask),
+        _apply_tactile_mask(target, target_mask),
+    )
 
 
 def _plot_summary(pred, target, output_path):
@@ -781,13 +810,14 @@ def _save_outputs(result, output_dir, segment_index, args):
             "history. When enabled, sampling follows deployment order: predicted "
             "video is cached before tactile, then tactile is cached before action."
         ),
+        "tactile_visualization": "masked_by_tactile_mask",
     }
     # Preserve the original filename while extending the payload to all modalities.
     torch.save(payload, segment_dir / "future_tactile_rollout.pt")
 
-    context = payload["tactile_context_raw"][0].float().numpy()
-    pred = payload["tactile_pred_raw"][0].float().numpy()
-    target = payload["tactile_target_raw"][0].float().numpy()
+    unmasked_pred = payload["tactile_pred_raw"][0].float().numpy()
+    unmasked_target = payload["tactile_target_raw"][0].float().numpy()
+    context, pred, target = _masked_tactile_arrays_from_payload(payload)
     _write_summary_csv(pred, target, segment_dir / "future_tactile_summary.csv")
     _plot_summary(pred, target, segment_dir / "future_tactile_summary.png")
     _plot_heatmaps(
@@ -796,7 +826,7 @@ def _save_outputs(result, output_dir, segment_index, args):
         target,
         segment_dir / "future_tactile_heatmaps_combined.png",
         args.num_plot_frames,
-        "Predicted Future Touch over Time (mean of two skin sheets)",
+        "Predicted Future Touch over Time (masked mean of two skin sheets)",
     )
     if args.plot_channels:
         for channel in range(pred.shape[0]):
@@ -806,7 +836,7 @@ def _save_outputs(result, output_dir, segment_index, args):
                 target,
                 segment_dir / f"future_tactile_heatmaps_sheet_{channel}.png",
                 args.num_plot_frames,
-                f"Predicted Future Touch over Time (skin sheet {channel})",
+                f"Predicted Future Touch over Time (masked skin sheet {channel})",
                 channel=channel,
             )
     action_mae = None
@@ -839,6 +869,8 @@ def _save_outputs(result, output_dir, segment_index, args):
         "segment_index": segment_index,
         "num_future_tactile_frames": int(pred.shape[1]),
         "tactile_raw_mae": float(np.abs(pred - target).mean()),
+        "tactile_raw_mae_unmasked": float(np.abs(unmasked_pred - unmasked_target).mean()),
+        "tactile_metrics_masked": True,
         "action_raw_mae": action_mae,
         "video_latent_mae": video_latent_mae,
     }

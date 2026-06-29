@@ -346,10 +346,35 @@ def _plot_tactile_maps(
             axes[row, step + 1].set_xticks([])
             axes[row, step + 1].set_yticks([])
 
-    fig.suptitle(f"Single-Step Tactile Diagnostic ({title_suffix})", fontsize=13)
+    fig.suptitle(f"Single-Step Tactile Diagnostic ({title_suffix}, masked)", fontsize=13)
     fig.tight_layout()
     fig.savefig(output_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
+
+
+def _masked_tactile_tensors_from_payload(payload: dict):
+    context = payload["tactile_context_raw"][0].float()
+    pred = payload["tactile_pred_raw"][0].float()
+    target = payload["tactile_target_raw"][0].float()
+    context_mask = payload.get("tactile_context_mask")
+    target_mask = payload.get("tactile_target_mask")
+    if torch.is_tensor(context_mask):
+        context = context * context_mask[0].float()
+    elif context_mask is not None:
+        context = context * torch.as_tensor(context_mask[0], dtype=context.dtype)
+    if torch.is_tensor(target_mask):
+        target_mask = target_mask[0].float()
+        pred = pred * target_mask
+        target = target * target_mask
+    elif target_mask is not None:
+        target_mask = torch.as_tensor(target_mask[0], dtype=pred.dtype)
+        pred = pred * target_mask
+        target = target * target_mask
+    return context, pred, target
+
+
+def _masked_tactile_arrays_from_payload(payload: dict):
+    return tuple(_to_numpy(value) for value in _masked_tactile_tensors_from_payload(payload))
 
 
 def _tactile_summary_maps(context: np.ndarray, pred: np.ndarray, target: np.ndarray):
@@ -401,7 +426,7 @@ def _plot_tactile_grid(records: list[dict], output_path: Path):
                 axes[row, col].set_title(title)
             if col == 0:
                 axes[row, col].set_ylabel(f"t={record['latent_index']}")
-    fig.suptitle("Independent Single-Step Tactile Grid (mean sheets/substeps)", fontsize=13)
+    fig.suptitle("Independent Single-Step Tactile Grid (masked mean sheets/substeps)", fontsize=13)
     fig.tight_layout()
     fig.savefig(output_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
@@ -509,9 +534,10 @@ def _metrics_from_payload(payload: dict) -> dict:
     video_pred = payload["video_pred_latent"][0].float()
     video_target = payload["video_target_latent"][0].float()
     video_context = payload["video_context_latent"][0].float()
-    tactile_pred = payload["tactile_pred_raw"][0].float()
-    tactile_target = payload["tactile_target_raw"][0].float()
-    tactile_context = payload["tactile_context_raw"][0].float()
+    tactile_context, tactile_pred, tactile_target = _masked_tactile_tensors_from_payload(payload)
+    tactile_pred_unmasked = payload["tactile_pred_raw"][0].float()
+    tactile_target_unmasked = payload["tactile_target_raw"][0].float()
+    tactile_context_unmasked = payload["tactile_context_raw"][0].float()
     action_pred = payload["action_pred_raw_used"][0].float()
     action_target = payload["action_target_raw_used"][0].float()
     action_mask = payload["action_target_mask_used"][0].bool()
@@ -528,6 +554,20 @@ def _metrics_from_payload(payload: dict) -> dict:
         "tactile_pred_motion_mae": float(
             torch.abs(tactile_pred - tactile_context[:, -1:].expand_as(tactile_pred)).mean().item()
         ),
+        "tactile_raw_mae_unmasked": float(torch.abs(tactile_pred_unmasked - tactile_target_unmasked).mean().item()),
+        "tactile_target_motion_mae_unmasked": float(
+            torch.abs(
+                tactile_target_unmasked
+                - tactile_context_unmasked[:, -1:].expand_as(tactile_target_unmasked)
+            ).mean().item()
+        ),
+        "tactile_pred_motion_mae_unmasked": float(
+            torch.abs(
+                tactile_pred_unmasked
+                - tactile_context_unmasked[:, -1:].expand_as(tactile_pred_unmasked)
+            ).mean().item()
+        ),
+        "tactile_metrics_masked": True,
         "action_raw_mae": float(valid_action_error.mean().item()) if valid_action_error.numel() else None,
     }
 
@@ -547,19 +587,20 @@ def _save_single_step_outputs(payload: dict, output_dir: Path, args, config, sav
         _to_numpy(payload["video_target_latent"][0]),
         output_dir / "video_latent_single_step.png",
     )
+    tactile_context, tactile_pred, tactile_target = _masked_tactile_arrays_from_payload(payload)
     _plot_tactile_maps(
-        _to_numpy(payload["tactile_context_raw"][0]),
-        _to_numpy(payload["tactile_pred_raw"][0]),
-        _to_numpy(payload["tactile_target_raw"][0]),
+        tactile_context,
+        tactile_pred,
+        tactile_target,
         output_dir / "tactile_single_step_mean.png",
         channel=None,
     )
     if args.plot_channels:
         for channel in range(payload["tactile_pred_raw"].shape[1]):
             _plot_tactile_maps(
-                _to_numpy(payload["tactile_context_raw"][0]),
-                _to_numpy(payload["tactile_pred_raw"][0]),
-                _to_numpy(payload["tactile_target_raw"][0]),
+                tactile_context,
+                tactile_pred,
+                tactile_target,
                 output_dir / f"tactile_single_step_sheet_{channel}.png",
                 channel=channel,
             )
@@ -581,14 +622,15 @@ def _save_single_step_outputs(payload: dict, output_dir: Path, args, config, sav
 
 
 def _record_from_payload(payload: dict) -> dict:
+    tactile_context, tactile_pred, tactile_target = _masked_tactile_arrays_from_payload(payload)
     record = {
         "latent_index": int(payload["meta"]["latent_index"]),
         "video_context_latent": _to_numpy(payload["video_context_latent"][0]),
         "video_pred_latent": _to_numpy(payload["video_pred_latent"][0]),
         "video_target_latent": _to_numpy(payload["video_target_latent"][0]),
-        "tactile_context_raw": _to_numpy(payload["tactile_context_raw"][0]),
-        "tactile_pred_raw": _to_numpy(payload["tactile_pred_raw"][0]),
-        "tactile_target_raw": _to_numpy(payload["tactile_target_raw"][0]),
+        "tactile_context_raw": tactile_context,
+        "tactile_pred_raw": tactile_pred,
+        "tactile_target_raw": tactile_target,
         "action_context_raw_used": _to_numpy(payload["action_context_raw_used"][0]),
         "action_pred_raw_used": _to_numpy(payload["action_pred_raw_used"][0]),
         "action_target_raw_used": _to_numpy(payload["action_target_raw_used"][0]),
@@ -716,6 +758,7 @@ def run(args):
             "tactile_inference_steps": args.tactile_inference_steps,
             "action_inference_steps": args.action_inference_steps,
             "num_latent_steps": num_steps,
+            "tactile_visualization": "masked_by_tactile_mask",
         }
 
         step_output_dir = output_root if num_steps == 1 else output_root / f"latent_{latent_index:04d}"

@@ -27,7 +27,6 @@ robotwin_tactile_cfg.action_dim = 30
 robotwin_tactile_cfg.action_per_frame = 4
 robotwin_tactile_cfg.obs_cam_keys = [
     "observation.images.cam_front",
-    "observation.images.cam_side",
     "observation.images.cam_fisheye",
 ]
 
@@ -101,8 +100,8 @@ robotwin_tactile_lowmem_cfg.guidance_scale = 1
 robotwin_tactile_lowmem_cfg.action_guidance_scale = 1
 robotwin_tactile_lowmem_cfg.tactile_guidance_scale = 1
 robotwin_tactile_lowmem_cfg.num_inference_steps = 20
-robotwin_tactile_lowmem_cfg.action_num_inference_steps = 20
-robotwin_tactile_lowmem_cfg.tactile_num_inference_steps = 20
+robotwin_tactile_lowmem_cfg.action_num_inference_steps = 50
+robotwin_tactile_lowmem_cfg.tactile_num_inference_steps = 50
 
 
 robotwin_tactile_train_cfg = EasyDict(deepcopy(robotwin_tactile_cfg))
